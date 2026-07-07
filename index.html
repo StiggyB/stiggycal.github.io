@@ -63,7 +63,8 @@
   .pill-heute{font-size:13px; padding:6px 14px; border-radius:999px; border:1px solid var(--line); color:var(--ink); min-height:32px}
   .chips{display:flex; flex-wrap:wrap; gap:6px; padding-bottom:12px}
   .composer .chips{padding-bottom:8px}
-  .chip{flex:0 0 auto; font-size:12px; padding:6px 12px; border-radius:999px; display:inline-flex; align-items:center; gap:6px; border:1px solid var(--line); color:var(--inkSoft); background:transparent; min-height:32px}
+  .chip{flex:1 1 auto; min-width:0; justify-content:center; font-size:12px; padding:6px 10px; border-radius:999px; display:inline-flex; align-items:center; gap:6px; border:1px solid var(--line); color:var(--inkSoft); background:transparent; min-height:32px; white-space:nowrap}
+  .chip .lbl{overflow:hidden; text-overflow:ellipsis}
   .dot{display:inline-block; width:8px; height:8px; border-radius:999px}
   .dot-sm{width:6px; height:6px}
   .wd-head{display:grid; grid-template-columns:repeat(7,1fr); margin-bottom:4px}
@@ -144,6 +145,22 @@
   .grip{width:40px; height:4px; border-radius:999px; margin:0 auto 16px; background:var(--line)}
   .menu-item{width:100%; display:flex; align-items:center; gap:12px; padding:12px 4px; text-align:left; color:var(--ink); font-size:16px}
   .menu-sep{border-top:1px solid var(--line)}
+  /* Login / Gate */
+  .gate{flex:1; display:flex; flex-direction:column; justify-content:center; align-items:stretch; padding:28px 24px; gap:12px}
+  .gate-brand{display:flex; align-items:center; gap:10px; justify-content:center; margin-bottom:6px; color:var(--ink)}
+  .gate-brand .b{font-family:var(--serif); font-weight:600; font-size:22px}
+  .gate h1{font-family:var(--serif); font-weight:500; font-size:22px; text-align:center; margin:0}
+  .gate p.lead{text-align:center; font-size:14px; color:var(--inkSoft); margin:0 4px 6px; line-height:1.5}
+  .gate .field{display:flex; flex-direction:column; gap:6px}
+  .gate label{font-size:13px; color:var(--inkSoft); padding-left:4px}
+  .gate input{width:100%; border-radius:14px; padding:13px 14px; font-size:16px; background:var(--card); border:1px solid var(--line); color:var(--ink); outline:none}
+  .gate input:focus{border-color:var(--ring)}
+  .gate .primary{background:var(--ink); color:var(--card); padding:14px; border-radius:14px; font-size:16px; font-weight:500; min-height:48px; margin-top:4px}
+  .gate .primary:disabled{background:var(--ring)}
+  .gate .ghost{color:var(--inkSoft); font-size:14px; padding:8px; min-height:44px}
+  .gate .err{color:#C0504D; font-size:13px; text-align:center; min-height:18px; margin:0}
+  .gate .warn{background:#B0843F14; border:1px solid #B0843F44; border-radius:14px; padding:12px 14px; font-size:12.5px; color:#7a5b25; line-height:1.5; margin-top:4px}
+  .lock-icon{display:flex; justify-content:center; color:var(--inkSoft); margin-bottom:2px}
   .toast{position:fixed; left:50%; transform:translateX(-50%); bottom:24px; z-index:40; padding:10px 16px; border-radius:999px; font-size:14px; background:var(--ink); color:var(--card)}
   .hidden{display:none !important}
   @media (prefers-reduced-motion: reduce){*{transition:none!important; animation:none!important}}
@@ -218,9 +235,103 @@
   function dbPut(store,val){ return pReq(tx(store,"readwrite").put(val)); }
   function dbDelete(store,key){ return pReq(tx(store,"readwrite").delete(key)); }
 
+  // ---------- Verschlüsselung (Web Crypto: PBKDF2 -> AES-GCM-256) ----------
+  var subtle = (window.crypto && window.crypto.subtle) ? window.crypto.subtle : null;
+  function rndBytes(n){ var a=new Uint8Array(n); window.crypto.getRandomValues(a); return a; }
+  function b64(bytes){ var a=new Uint8Array(bytes), s=""; for(var i=0;i<a.length;i++) s+=String.fromCharCode(a[i]); return btoa(s); }
+  function fromB64(str){ var s=atob(str), a=new Uint8Array(s.length); for(var i=0;i<s.length;i++) a[i]=s.charCodeAt(i); return a; }
+  async function deriveKey(password, salt, iterations){
+    var base = await subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveKey"]);
+    return subtle.deriveKey({ name:"PBKDF2", salt:salt, iterations:iterations, hash:"SHA-256" },
+      base, { name:"AES-GCM", length:256 }, false, ["encrypt","decrypt"]);
+  }
+  async function encJSON(key, obj){
+    var iv = rndBytes(12);
+    var data = new TextEncoder().encode(JSON.stringify(obj));
+    var ct = await subtle.encrypt({ name:"AES-GCM", iv:iv }, key, data);
+    return { iv:b64(iv), ct:b64(new Uint8Array(ct)) };
+  }
+  async function decJSON(key, blob){
+    var pt = await subtle.decrypt({ name:"AES-GCM", iv:fromB64(blob.iv) }, key, fromB64(blob.ct));
+    return JSON.parse(new TextDecoder().decode(pt));
+  }
+
+  // ---------- Verschlüsselte Persistenz ----------
+  async function putEntry(rec){
+    var enc = await encJSON(sessionKey, { date:rec.date, ts:rec.ts, text:rec.text, cat:rec.cat });
+    await dbPut("entries", { id:rec.id, enc:enc });
+  }
+  async function loadAllEntries(){
+    var raw = await dbGetAll("entries") || [];
+    var out = [];
+    for(var i=0;i<raw.length;i++){
+      var r = raw[i];
+      if(r && r.enc){ try{ var p = await decJSON(sessionKey, r.enc); out.push({ id:r.id, date:p.date, ts:p.ts, text:p.text, cat:p.cat }); }catch(e){} }
+    }
+    return out;
+  }
+  async function saveCatsEnc(){
+    await dbPut("prefs", { key:"cats", enc: await encJSON(sessionKey, S.cats) });
+  }
+
+  // ---------- Auth ----------
+  async function hasAuth(){ var a = await dbGet("prefs","auth"); return !!(a && a.salt && a.verifier); }
+  async function setupPassword(password){
+    var salt = rndBytes(16);
+    var key = await deriveKey(password, salt, PBKDF2_ITER);
+    var verifier = await encJSON(key, VERIFY_TOKEN);
+    sessionKey = key;
+    await dbPut("prefs", { key:"auth", salt:b64(salt), iterations:PBKDF2_ITER, verifier:verifier });
+    // Bestehende Klartext-Daten (aus früheren Versionen) migrieren
+    var raw = await dbGetAll("entries") || [];
+    for(var i=0;i<raw.length;i++){ var r=raw[i]; if(r && !r.enc && r.text){ await putEntry(r); } }
+    var oldCats = await dbGet("prefs","cats");
+    if(oldCats && Array.isArray(oldCats.value) && oldCats.value.length){ S.cats = oldCats.value; }
+    S.draftCat = S.cats[0] ? S.cats[0].key : "privat";
+    await saveCatsEnc();
+    entries = await loadAllEntries();
+  }
+  async function unlock(password){
+    var a = await dbGet("prefs","auth");
+    if(!a) return false;
+    var key = await deriveKey(password, fromB64(a.salt), a.iterations || PBKDF2_ITER);
+    try{ var v = await decJSON(key, a.verifier); if(v !== VERIFY_TOKEN) return false; }
+    catch(e){ return false; }
+    sessionKey = key;
+    var c = await dbGet("prefs","cats");
+    if(c && c.enc){ try{ var arr = await decJSON(sessionKey, c.enc); if(Array.isArray(arr) && arr.length) S.cats = arr; }catch(e){} }
+    else if(c && Array.isArray(c.value) && c.value.length){ S.cats = c.value; await saveCatsEnc(); }
+    S.draftCat = S.cats[0] ? S.cats[0].key : "privat";
+    entries = await loadAllEntries();
+    return true;
+  }
+  async function changePassword(oldPw, newPw){
+    var a = await dbGet("prefs","auth");
+    if(!a) return false;
+    var oldKey = await deriveKey(oldPw, fromB64(a.salt), a.iterations || PBKDF2_ITER);
+    try{ var v = await decJSON(oldKey, a.verifier); if(v !== VERIFY_TOKEN) return false; }
+    catch(e){ return false; }
+    var salt = rndBytes(16);
+    var newKey = await deriveKey(newPw, salt, PBKDF2_ITER);
+    sessionKey = newKey;                       // ab jetzt mit neuem Schlüssel schreiben
+    for(var i=0;i<entries.length;i++){ await putEntry(entries[i]); }
+    await saveCatsEnc();
+    await dbPut("prefs", { key:"auth", salt:b64(salt), iterations:PBKDF2_ITER, verifier: await encJSON(newKey, VERIFY_TOKEN) });
+    return true;
+  }
+  function lock(){
+    sessionKey = null; entries = []; S.cats = DEFAULT_CATS.slice();
+    S.view="calendar"; S.calMode="month"; S.menuOpen=false; S.selected=null;
+    S.draftText=""; S.editingId=null; S.searchQ=""; S.searchRes=[];
+    S.gate="login"; S.gateErr=""; render();
+  }
+
   // ---------- Zustand ----------
   var now = new Date();
   var S = {
+    gate: "boot",               // boot | setup | login | change | null(=entsperrt)
+    gateErr: "",
+    gateBusy: false,
     view: "calendar",           // calendar | day | search | cats | stats
     calMode: "month",           // month | week
     year: now.getFullYear(),
@@ -246,6 +357,11 @@
   var recognition = null;
   var toastTimer = null;
   var todayKey = keyOf(new Date());
+  var sessionKey = null;        // AES-Schlüssel, nur im Speicher – nie gespeichert
+  var hiddenAt = 0;             // Zeitpunkt des Wegschaltens (für Auto-Sperre)
+  var AUTO_LOCK_MS = 5 * 60 * 1000;
+  var VERIFY_TOKEN = "tagebuch-verify-v1";
+  var PBKDF2_ITER = 210000;
 
   function findCat(k){ for(var i=0;i<S.cats.length;i++) if(S.cats[i].key===k) return S.cats[i]; return FALLBACK; }
   function entriesFor(dk){ return entries.filter(function(e){ return e.date===dk; }); }
@@ -267,7 +383,10 @@
     Plus:'<path d="M5 12h14"/><path d="M12 5v14"/>',
     CalendarDays:'<path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/>',
     Tag:'<path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"/><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"/>',
-    BarChart:'<line x1="12" x2="12" y1="20" y2="10"/><line x1="18" x2="18" y1="20" y2="4"/><line x1="6" x2="6" y1="20" y2="14"/>'
+    BarChart:'<line x1="12" x2="12" y1="20" y2="10"/><line x1="18" x2="18" y1="20" y2="4"/><line x1="6" x2="6" y1="20" y2="14"/>',
+    Lock:'<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+    LockBig:'<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><circle cx="12" cy="16" r="1"/>',
+    KeyRound:'<path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/>'
   };
   function icon(name, size){
     size = size || 20;
@@ -301,14 +420,14 @@
     if(includeAll){
       var on = activeKey==="all";
       html += '<button class="chip" data-chip="all" style="'+
-        (on?'background:var(--ink);color:var(--card);border-color:var(--ink);':'')+'">'+esc(allLabel||"Alle")+'</button>';
+        (on?'background:var(--ink);color:var(--card);border-color:var(--ink);':'')+'"><span class="lbl">'+esc(allLabel||"Alle")+'</span></button>';
     }
     S.cats.forEach(function(c){
       var on = activeKey===c.key;
       var style = on ? 'background:'+c.color+';color:#fff;border-color:'+c.color+';' : '';
       var dotBg = on ? '#fff' : c.color;
       html += '<button class="chip" data-chip="'+esc(c.key)+'" style="'+style+'">'+
-              '<span class="dot" style="background:'+dotBg+'"></span>'+esc(c.label)+'</button>';
+              '<span class="dot" style="background:'+dotBg+'"></span><span class="lbl">'+esc(c.label)+'</span></button>';
     });
     return html;
   }
@@ -656,13 +775,63 @@
         '<button class="menu-item" data-act="export"><span style="color:var(--inkSoft)">'+icon("Download",19)+'</span><span>Als Datei sichern (JSON)</span></button>'+
         '<div class="menu-sep"></div>'+
         '<button class="menu-item" data-act="import"><span style="color:var(--inkSoft)">'+icon("Upload",19)+'</span><span>Aus Datei importieren</span></button>'+
-        '<p class="note" style="margin-top:12px">Deine Einträge werden dauerhaft auf diesem Gerät gespeichert. Sichere sie regelmäßig als Datei – dein Backup und dein Umzugsweg.</p>'+
+        '<div class="menu-sep"></div>'+
+        '<button class="menu-item" data-act="change-pw"><span style="color:var(--inkSoft)">'+icon("KeyRound",19)+'</span><span>Passwort ändern</span></button>'+
+        '<div class="menu-sep"></div>'+
+        '<button class="menu-item" data-act="lock"><span style="color:var(--inkSoft)">'+icon("Lock",19)+'</span><span>Sperren</span></button>'+
+        '<p class="note" style="margin-top:12px">Deine Einträge sind mit deinem Passwort verschlüsselt und liegen nur auf diesem Gerät. Sichere sie regelmäßig als Datei – dein Backup und dein Umzugsweg.</p>'+
       '</div>'+
     '</div>';
   }
 
+  // ---------- Login / Gate ----------
+  function gateHTML(){
+    var brand = '<div class="gate-brand"><span style="color:var(--inkSoft)">'+icon("CalendarDays",22)+'</span><span class="b">Tagebuch</span></div>';
+    var err = '<p class="err">'+esc(S.gateErr)+'</p>';
+    if(S.gate==="setup"){
+      return '<div class="shell"><main class="gate">'+brand+
+        '<div class="lock-icon">'+icon("LockBig",30)+'</div>'+
+        '<h1>Passwort einrichten</h1>'+
+        '<p class="lead">Wähle ein Passwort. Deine Einträge werden damit verschlüsselt – niemand kann sie ohne dieses Passwort lesen.</p>'+
+        '<div class="field"><label for="pw1">Passwort (mind. 6 Zeichen)</label><input id="pw1" type="password" autocomplete="new-password" inputmode="text" /></div>'+
+        '<div class="field"><label for="pw2">Passwort wiederholen</label><input id="pw2" type="password" autocomplete="new-password" /></div>'+
+        err+
+        '<button class="primary" id="gateSetup"'+(S.gateBusy?" disabled":"")+'>'+(S.gateBusy?"Wird eingerichtet…":"Einrichten")+'</button>'+
+        '<div class="warn"><b>Wichtig:</b> Es gibt keinen Passwort-Reset. Vergisst du das Passwort, sind die Einträge unwiederbringlich verloren. Sichere regelmäßig über „Als Datei sichern".</div>'+
+      '</main></div>';
+    }
+    if(S.gate==="change"){
+      return '<div class="shell"><main class="gate">'+brand+
+        '<div class="lock-icon">'+icon("KeyRound",28)+'</div>'+
+        '<h1>Passwort ändern</h1>'+
+        '<p class="lead">Alle Einträge werden mit dem neuen Passwort neu verschlüsselt.</p>'+
+        '<div class="field"><label for="pwo">Aktuelles Passwort</label><input id="pwo" type="password" autocomplete="current-password" /></div>'+
+        '<div class="field"><label for="pw1">Neues Passwort (mind. 6 Zeichen)</label><input id="pw1" type="password" autocomplete="new-password" /></div>'+
+        '<div class="field"><label for="pw2">Neues Passwort wiederholen</label><input id="pw2" type="password" autocomplete="new-password" /></div>'+
+        err+
+        '<button class="primary" id="gateChange"'+(S.gateBusy?" disabled":"")+'>'+(S.gateBusy?"Wird geändert…":"Ändern")+'</button>'+
+        '<button class="ghost" data-act="gate-cancel">Abbrechen</button>'+
+      '</main></div>';
+    }
+    // login
+    return '<div class="shell"><main class="gate">'+brand+
+      '<div class="lock-icon">'+icon("LockBig",30)+'</div>'+
+      '<h1>Willkommen zurück</h1>'+
+      '<p class="lead">Gib dein Passwort ein, um dein Tagebuch zu entsperren.</p>'+
+      '<div class="field"><label for="pw1">Passwort</label><input id="pw1" type="password" autocomplete="current-password" autofocus /></div>'+
+      err+
+      '<button class="primary" id="gateLogin"'+(S.gateBusy?" disabled":"")+'>'+(S.gateBusy?"Entsperren…":"Entsperren")+'</button>'+
+    '</main></div>';
+  }
+
   // ---------- Haupt-Render ----------
   function render(){
+    if(S.gate){
+      appEl.innerHTML = gateHTML();
+      var f = document.getElementById(S.gate==="change" ? "pwo" : "pw1");
+      if(f && !S.gateBusy) setTimeout(function(){ try{ f.focus(); }catch(_){} }, 30);
+      return;
+    }
     var html;
     if(S.view==="calendar") html = calendarHTML();
     else if(S.view==="day")  html = dayHTML();
@@ -708,6 +877,14 @@
       render();
     }
   }
+  function shiftDay(dir){
+    if(!S.selected) return;
+    var d = addDays(parseKey(S.selected), dir);
+    S.selected = keyOf(d);
+    S.year = d.getFullYear(); S.month = d.getMonth(); S.weekAnchor = S.selected;
+    S.editingId = null; S.draftText = "";
+    render();
+  }
   function openStats(){
     if(S.calMode==="week"){ var mon=mondayOf(parseKey(S.weekAnchor)); var mid=addDays(mon,3); S.statsYear=mid.getFullYear(); S.statsMonth=mid.getMonth(); }
     else { S.statsYear=S.year; S.statsMonth=S.month; }
@@ -725,10 +902,10 @@
     if(!text || !S.selected) return;
     if(S.editingId){
       var e = entries.find(function(x){ return x.id===S.editingId; });
-      if(e){ e.text=text; e.cat=S.draftCat; await dbPut("entries", e); }
+      if(e){ e.text=text; e.cat=S.draftCat; await putEntry(e); }
     } else {
       var rec = { id:uid(), date:S.selected, ts:Date.now(), text:text, cat:S.draftCat };
-      entries.push(rec); await dbPut("entries", rec);
+      entries.push(rec); await putEntry(rec);
     }
     S.draftText=""; S.editingId=null; render();
   }
@@ -798,7 +975,7 @@
         if(!e || !e.date || !e.text) continue;
         var rec = { id:e.id || uid(), date:e.date, ts:e.ts || Date.now(), text:e.text, cat:e.cat || (S.cats[0] && S.cats[0].key) || "privat" };
         if(existing[rec.id]) continue;
-        existing[rec.id]=true; entries.push(rec); await dbPut("entries", rec); added++;
+        existing[rec.id]=true; entries.push(rec); await putEntry(rec); added++;
       }
       S.menuOpen=false; render(); flash(added+" Einträge importiert");
     } catch(err){ flash("Import fehlgeschlagen – ungültige Datei"); }
@@ -806,7 +983,7 @@
 
   async function saveCats(next){
     S.cats = next;
-    await dbPut("prefs", { key:"cats", value:next });
+    await saveCatsEnc();
     if(S.filter!=="all" && !S.cats.some(function(c){ return c.key===S.filter; })) S.filter="all";
     if(!S.cats.some(function(c){ return c.key===S.draftCat; })) S.draftCat = S.cats[0] ? S.cats[0].key : "privat";
   }
@@ -818,7 +995,7 @@
   }
   function renameCat(key, label){
     var c = S.cats.find(function(x){ return x.key===key; });
-    if(c){ c.label = label; dbPut("prefs", { key:"cats", value:S.cats }); }
+    if(c){ c.label = label; saveCatsEnc(); }
   }
   function recolorCat(key, color){
     var next = S.cats.map(function(c){ return c.key===key ? Object.assign({}, c, { color:color }) : c; });
@@ -870,6 +1047,45 @@
   appEl.addEventListener("pointerup", endDrag);
   appEl.addEventListener("pointercancel", endDrag);
 
+  // ---------- Gate-Aktionen ----------
+  function gateError(msg){
+    S.gateErr = msg;
+    var el = document.querySelector(".gate .err");
+    if(el) el.textContent = msg; else render();
+  }
+  async function doSetup(){
+    if(S.gateBusy) return;
+    var p1=document.getElementById("pw1"), p2=document.getElementById("pw2");
+    var a=p1?p1.value:"", b=p2?p2.value:"";
+    if(a.length<6){ gateError("Mindestens 6 Zeichen."); return; }
+    if(a!==b){ gateError("Passwörter stimmen nicht überein."); return; }
+    S.gateBusy=true; S.gateErr=""; render();
+    try{ await setupPassword(a); S.gateBusy=false; S.gate=null; S.view="calendar"; render(); }
+    catch(e){ console.error(e); S.gateBusy=false; S.gateErr="Fehler beim Einrichten."; render(); }
+  }
+  async function doLogin(){
+    if(S.gateBusy) return;
+    var p1=document.getElementById("pw1"); var a=p1?p1.value:"";
+    if(!a){ gateError("Bitte Passwort eingeben."); return; }
+    S.gateBusy=true; S.gateErr=""; render();
+    var ok=false; try{ ok=await unlock(a); }catch(e){ ok=false; }
+    S.gateBusy=false;
+    if(ok){ S.gate=null; S.view="calendar"; hiddenAt=0; render(); }
+    else { S.gateErr="Falsches Passwort."; render(); }
+  }
+  async function doChange(){
+    if(S.gateBusy) return;
+    var po=document.getElementById("pwo"), p1=document.getElementById("pw1"), p2=document.getElementById("pw2");
+    var o=po?po.value:"", a=p1?p1.value:"", b=p2?p2.value:"";
+    if(a.length<6){ gateError("Neues Passwort: mindestens 6 Zeichen."); return; }
+    if(a!==b){ gateError("Neue Passwörter stimmen nicht überein."); return; }
+    S.gateBusy=true; S.gateErr=""; render();
+    var ok=false; try{ ok=await changePassword(o,a); }catch(e){ ok=false; }
+    S.gateBusy=false;
+    if(ok){ S.gate=null; render(); flash("Passwort geändert"); }
+    else { S.gateErr="Aktuelles Passwort ist falsch."; render(); }
+  }
+
   // ---------- Event-Delegation (Klicks) ----------
   appEl.addEventListener("click", function(ev){
     var t = ev.target.closest("[data-act],[data-day],[data-edit],[data-del],[data-chip],[data-goto],[data-colortoggle],[data-recolor],[data-catdel-ask],[data-catdel-yes],[data-catdel-no]");
@@ -916,6 +1132,9 @@
       case "add-cat": addCat(); break;
       case "export": exportJSON(); break;
       case "import": fileInput.click(); break;
+      case "change-pw": S.gate="change"; S.gateErr=""; S.menuOpen=false; render(); break;
+      case "lock": lock(); break;
+      case "gate-cancel": S.gate=null; S.gateErr=""; render(); break;
     }
   });
 
@@ -944,6 +1163,41 @@
     if(ev.target.id==="ta" && ev.key==="Enter" && !ev.shiftKey){ ev.preventDefault(); submitEntry(); }
   });
 
+  // Gate: Buttons + Enter
+  appEl.addEventListener("click", function(ev){
+    if(ev.target.closest("#gateSetup")){ doSetup(); }
+    else if(ev.target.closest("#gateLogin")){ doLogin(); }
+    else if(ev.target.closest("#gateChange")){ doChange(); }
+  });
+  appEl.addEventListener("keydown", function(ev){
+    if(!S.gate || ev.key!=="Enter") return;
+    ev.preventDefault();
+    if(S.gate==="setup") doSetup();
+    else if(S.gate==="change") doChange();
+    else doLogin();
+  });
+
+  // Swipe-Navigation: Tag (Detail) / Monat + Woche (Kalender)
+  var sw = null;
+  appEl.addEventListener("touchstart", function(e){
+    if(S.gate){ sw=null; return; }
+    if(!(S.view==="day" || S.view==="calendar")){ sw=null; return; }
+    if(e.touches.length!==1){ sw=null; return; }
+    if(e.target.closest("textarea,input,.chips,.seg,.swatches,.backdrop")){ sw=null; return; }
+    var t=e.touches[0]; sw={ x:t.clientX, y:t.clientY, t:Date.now() };
+  }, { passive:true });
+  appEl.addEventListener("touchend", function(e){
+    if(!sw) return;
+    var t=e.changedTouches[0];
+    var dx=t.clientX-sw.x, dy=t.clientY-sw.y, dt=Date.now()-sw.t;
+    sw=null;
+    if(dt>700) return;
+    if(Math.abs(dx)<60 || Math.abs(dx) < Math.abs(dy)*1.7) return;
+    var dir = dx<0 ? 1 : -1;   // links wischen -> vor, rechts -> zurück
+    if(S.view==="day") shiftDay(dir);
+    else if(S.view==="calendar") calShift(dir);
+  }, { passive:true });
+
   // Datei-Import
   fileInput.addEventListener("change", function(ev){
     var f = ev.target.files && ev.target.files[0];
@@ -953,24 +1207,34 @@
 
   // ---------- Start ----------
   async function boot(){
+    if(!subtle){
+      appEl.innerHTML = '<div class="shell"><main class="gate">'+
+        '<div class="gate-brand"><span class="b">Tagebuch</span></div>'+
+        '<h1>Nicht verfügbar</h1>'+
+        '<p class="lead">Dieser Browser stellt keine sichere Verschlüsselung (Web Crypto) bereit. Bitte die App über <b>HTTPS</b> öffnen und einen aktuellen Browser verwenden.</p>'+
+        '</main></div>';
+      return;
+    }
     try{
       _db = await openDB();
-      var prefCats = await dbGet("prefs","cats");
-      if(prefCats && Array.isArray(prefCats.value) && prefCats.value.length){ S.cats = prefCats.value; }
-      else { await dbPut("prefs", { key:"cats", value:DEFAULT_CATS }); }
-      S.draftCat = S.cats[0] ? S.cats[0].key : "privat";
-      entries = await dbGetAll("entries") || [];
+      S.gate = (await hasAuth()) ? "login" : "setup";
     } catch(err){
       console.error("DB-Fehler:", err);
-      flash("Speicher nicht verfügbar – Daten werden evtl. nicht gesichert.");
+      S.gate = "setup";
+      flash("Speicher nicht verfügbar.");
     }
-    render();
+    S.gateErr=""; render();
     if(navigator.storage && navigator.storage.persist){ navigator.storage.persist().catch(function(){}); }
     if("serviceWorker" in navigator){
       window.addEventListener("load", function(){
         navigator.serviceWorker.register("./service-worker.js").catch(function(e){ console.warn("SW:", e); });
       });
     }
+    // Auto-Sperre nach Inaktivität im Hintergrund
+    document.addEventListener("visibilitychange", function(){
+      if(document.hidden){ hiddenAt = Date.now(); }
+      else if(!S.gate && sessionKey && hiddenAt && (Date.now()-hiddenAt > AUTO_LOCK_MS)){ lock(); }
+    });
   }
   boot();
 })();
