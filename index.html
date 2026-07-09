@@ -76,13 +76,16 @@
   .day .num{font-size:14px; color:var(--ink)}
   .day.today .num{font-weight:700}
   .day .dots{display:flex; gap:2px; margin-top:4px; flex-wrap:wrap; justify-content:center; padding:0 4px}
-  .day .marks{margin-top:auto; padding-top:2px; font-size:9px; line-height:1; font-weight:700; letter-spacing:1.5px; color:var(--inkSoft)}
+  .day .marks{margin-top:auto; padding:2px 3px 0; font-size:9px; line-height:1.25; font-weight:700; letter-spacing:1.2px; color:var(--inkSoft); text-align:center; word-break:break-word}
   /* Tages-Markierungen (W H S B) */
-  .marks-row{display:flex; align-items:center; gap:10px; padding:8px 16px; border-bottom:1px solid var(--line)}
+  .marks-row{display:flex; flex-wrap:wrap; align-items:center; gap:8px 10px; padding:10px 16px; border-bottom:1px solid var(--line)}
   .marks-label{font-size:12px; color:var(--inkSoft)}
-  .marks-toggles{display:flex; gap:6px; margin-left:auto}
-  .mtoggle{width:36px; height:36px; border-radius:10px; border:1px solid var(--line); color:var(--inkSoft); font-weight:700; font-size:14px; display:inline-flex; align-items:center; justify-content:center}
+  .marks-toggles{display:flex; gap:10px; flex-wrap:wrap; margin-left:auto}
+  .mstep{display:inline-flex; align-items:center; gap:4px}
+  .mtoggle{min-width:36px; height:36px; padding:0 8px; border-radius:10px; border:1px solid var(--line); color:var(--inkSoft); font-weight:700; font-size:14px; display:inline-flex; align-items:center; justify-content:center; gap:2px}
   .mtoggle.on{background:var(--ink); color:var(--card); border-color:var(--ink)}
+  .mtoggle .mcount{font-size:11px; font-weight:700; opacity:.9}
+  .mdec{width:28px; height:28px; border-radius:8px; border:1px solid var(--line); color:var(--inkSoft); font-size:18px; line-height:1; display:inline-flex; align-items:center; justify-content:center}
   .week-marks{font-size:11px; font-weight:700; letter-spacing:1.5px; color:var(--inkSoft); margin-left:8px}
   /* Wochenansicht */
   .week-list{display:flex; flex-direction:column; gap:8px}
@@ -315,7 +318,7 @@
     entries = await loadAllEntries();
     markers = {};
     var mk = await dbGet("prefs","markers");
-    if(mk && mk.enc){ try{ markers = (await decJSON(sessionKey, mk.enc)) || {}; }catch(e){ markers = {}; } }
+    if(mk && mk.enc){ try{ markers = normalizeMarkers(await decJSON(sessionKey, mk.enc)); }catch(e){ markers = {}; } }
     return true;
   }
   async function changePassword(oldPw, newPw){
@@ -380,14 +383,29 @@
 
   function findCat(k){ for(var i=0;i<S.cats.length;i++) if(S.cats[i].key===k) return S.cats[i]; return FALLBACK; }
   function entriesFor(dk){ return entries.filter(function(e){ return e.date===dk; }); }
-  function markersFor(dk){ return markers[dk] || []; }
+  function markCount(dk, L){ var m=markers[dk]; return (m && m[L]) || 0; }
+  function markersFor(dk){            // Buchstabenliste, je Anzahl wiederholt (Reihenfolge W H S B)
+    var m = markers[dk]; if(!m) return [];
+    var out=[]; for(var i=0;i<MARKERS.length;i++){ var n=m[MARKERS[i]]||0; for(var j=0;j<n;j++) out.push(MARKERS[i]); }
+    return out;
+  }
   async function saveMarkersEnc(){ await dbPut("prefs", { key:"markers", enc: await encJSON(sessionKey, markers) }); }
-  function toggleMarker(dk, letter){
-    var arr = markers[dk] ? markers[dk].slice() : [];
-    var i = arr.indexOf(letter);
-    if(i>=0) arr.splice(i,1); else { arr.push(letter); arr.sort(function(a,b){ return MARKERS.indexOf(a)-MARKERS.indexOf(b); }); }
-    if(arr.length) markers[dk]=arr; else delete markers[dk];
+  function incMarker(dk, L, delta){
+    var m = markers[dk] ? Object.assign({}, markers[dk]) : {};
+    var n = (m[L]||0) + delta;
+    if(n<=0) delete m[L]; else m[L]=n;
+    if(Object.keys(m).length) markers[dk]=m; else delete markers[dk];
     saveMarkersEnc();
+  }
+  function normalizeMarkers(obj){    // akzeptiert altes Array-Format und neues Zähl-Objekt
+    var out={};
+    Object.keys(obj||{}).forEach(function(k){
+      var v=obj[k], c={};
+      if(Array.isArray(v)){ v.forEach(function(L){ if(MARKERS.indexOf(L)>=0) c[L]=(c[L]||0)+1; }); }
+      else if(v && typeof v==="object"){ MARKERS.forEach(function(L){ var n=parseInt(v[L],10); if(n>0) c[L]=n; }); }
+      if(Object.keys(c).length) out[k]=c;
+    });
+    return out;
   }
 
   // ---------- Icons ----------
@@ -700,9 +718,13 @@
       }).join("");
     }
     var editing = !!S.editingId;
-    var mset = markersFor(S.selected);
-    var mtoggles = MARKERS.map(function(L){ var on=mset.indexOf(L)>=0;
-      return '<button class="mtoggle'+(on?" on":"")+'" data-mark="'+L+'" aria-pressed="'+(on?"true":"false")+'" aria-label="Markierung '+L+'">'+L+'</button>'; }).join("");
+    var mtoggles = MARKERS.map(function(L){
+      var n = markCount(S.selected, L);
+      var badge = n>=2 ? '<span class="mcount">×'+n+'</span>' : '';
+      var dec = n>=1 ? '<button class="mdec" data-mark-dec="'+L+'" aria-label="'+L+' verringern">−</button>' : '';
+      return '<span class="mstep">'+
+        '<button class="mtoggle'+(n>0?" on":"")+'" data-mark-inc="'+L+'" aria-label="'+L+' hinzufügen'+(n?" (aktuell "+n+")":"")+'">'+L+badge+'</button>'+
+        dec+'</span>'; }).join("");
     return headerHTML()+
     '<main>'+
       '<div class="sub-head">'+
@@ -1010,10 +1032,8 @@
         existing[rec.id]=true; entries.push(rec); await putEntry(rec); added++;
       }
       if(data.markers && typeof data.markers==="object" && !Array.isArray(data.markers)){
-        Object.keys(data.markers).forEach(function(k){
-          var v = data.markers[k];
-          if(Array.isArray(v)){ var f = v.filter(function(L){ return MARKERS.indexOf(L)>=0; }); if(f.length) markers[k]=f; }
-        });
+        var norm = normalizeMarkers(data.markers);
+        Object.keys(norm).forEach(function(k){ markers[k]=norm[k]; });
         await saveMarkersEnc();
       }
       S.menuOpen=false; render(); flash(added+" Einträge importiert");
@@ -1127,10 +1147,11 @@
 
   // ---------- Event-Delegation (Klicks) ----------
   appEl.addEventListener("click", function(ev){
-    var t = ev.target.closest("[data-act],[data-day],[data-edit],[data-del],[data-chip],[data-mark],[data-goto],[data-colortoggle],[data-recolor],[data-catdel-ask],[data-catdel-yes],[data-catdel-no]");
+    var t = ev.target.closest("[data-act],[data-day],[data-edit],[data-del],[data-chip],[data-mark-inc],[data-mark-dec],[data-goto],[data-colortoggle],[data-recolor],[data-catdel-ask],[data-catdel-yes],[data-catdel-no]");
     if(!t) return;
 
-    if(t.hasAttribute("data-mark")){ if(S.selected){ toggleMarker(S.selected, t.getAttribute("data-mark")); render(); } return; }
+    if(t.hasAttribute("data-mark-inc")){ if(S.selected){ incMarker(S.selected, t.getAttribute("data-mark-inc"), 1); render(); } return; }
+    if(t.hasAttribute("data-mark-dec")){ if(S.selected){ incMarker(S.selected, t.getAttribute("data-mark-dec"), -1); render(); } return; }
     if(t.hasAttribute("data-day")){ openDay(t.getAttribute("data-day")); return; }
     if(t.hasAttribute("data-edit")){ startEdit(t.getAttribute("data-edit")); return; }
     if(t.hasAttribute("data-del")){ deleteEntry(t.getAttribute("data-del")); return; }
