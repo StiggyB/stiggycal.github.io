@@ -11,8 +11,15 @@ Portiert aus dem ursprünglichen Claude-Artifact (`tagebuch.jsx`), aber komplett
 - **Passwortschutz mit Ende-zu-Ende-Verschlüsselung** (siehe unten)
 - Monatskalender mit Kategorie-Punkten pro Tag
 - **Wochenansicht** (Agenda) – umschaltbar Monat/Woche
-- **Monats-Statistik** – Kacheln, Balken pro Tag, Verteilung nach Kategorie
+- **Monats-Statistik** – Kacheln, Balken pro Tag, Stimmungsverlauf, Verteilung nach Kategorie
+- **Jahres-Heatmap** – Pixeljahr in der Statistik (umschaltbar Monat/Jahr),
+  einfärbbar nach Einträgen oder Stimmung; Tippen auf einen Tag öffnet ihn
 - Tag-Detail: Einträge anlegen, bearbeiten, löschen
+- **„An diesem Tag"** – Rückblick in der Tagesansicht auf Einträge vom selben
+  Datum vor 1/3/6 Monaten und in früheren Jahren
+- **Stimmung pro Tag** (5 Stufen, Emoji) – in der Tagesansicht antippen, klein
+  im Kalender/Wochenliste sichtbar, Verlauf in der Statistik
+- **Schreibserie** – 🔥-Anzeige der aktuellen Serie (Kalender-Untertitel und Tagesansicht)
 - **Wischen** (Swipe) für vorigen/nächsten Tag, Monat bzw. Woche
 - Frei konfigurierbare Kategorien (Name + Farbe), **per Drag sortierbar**;
   Kategorie-Chips füllen die Bildschirmbreite (mehrere Reihen)
@@ -20,8 +27,9 @@ Portiert aus dem ursprünglichen Claude-Artifact (`tagebuch.jsx`), aber komplett
   pro Tag **mehrfach zählbar** (in der Tagesansicht +/−); im Kalenderfeld klein
   und entsprechend oft wiederholt angezeigt (z. B. „W W S")
 - Volltext-Suche über alle Einträge
-- **JSON-Export/-Import** – Format identisch zum Claude-Artifact (`{ categories, entries }`),
-  d. h. alte Exporte lassen sich hier importieren
+- **JSON-Export/-Import** – Export enthält Kategorien, Markierungen, Stimmungen
+  und Einträge; ältere Exporte (auch das ursprüngliche Claude-Artifact-Format
+  `{ categories, entries }`) lassen sich weiterhin importieren
 - Spracheingabe (sofern vom Browser unterstützt)
 - Offline-fähig, installierbar („Zum Startbildschirm hinzufügen")
 - Barrierefrei: sichtbarer Fokus, Tap-Ziele ≥ 44 px, `prefers-reduced-motion` respektiert

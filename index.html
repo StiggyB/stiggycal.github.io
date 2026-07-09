@@ -87,6 +87,22 @@
   .mtoggle .mcount{font-size:11px; font-weight:700; opacity:.9}
   .mdec{width:28px; height:28px; border-radius:8px; border:1px solid var(--line); color:var(--inkSoft); font-size:18px; line-height:1; display:inline-flex; align-items:center; justify-content:center}
   .week-marks{font-size:11px; font-weight:700; letter-spacing:1.5px; color:var(--inkSoft); margin-left:8px}
+  /* Stimmung */
+  .mood-row{display:flex; align-items:center; gap:10px; padding:10px 16px; border-bottom:1px solid var(--line)}
+  .mood-btns{display:flex; gap:8px; margin-left:auto}
+  .mood-btn{min-width:38px; height:38px; border-radius:10px; border:1px solid var(--line); font-size:20px; display:inline-flex; align-items:center; justify-content:center; filter:grayscale(1); opacity:.55}
+  .mood-btn.on{filter:none; opacity:1; border-color:var(--ink); background:var(--card)}
+  .mood-mini{position:absolute; top:2px; right:3px; font-size:9px; line-height:1}
+  .week-mood{font-size:14px; line-height:1}
+  /* Schreibserie */
+  .streak-pill{margin-left:auto; font-size:13px; color:var(--inkSoft); border:1px solid var(--line); border-radius:999px; padding:4px 10px; white-space:nowrap; flex:0 0 auto}
+  /* An diesem Tag */
+  .otd-card{border-radius:16px; background:var(--card); border:1px solid var(--line); margin-bottom:12px; overflow:hidden}
+  .otd-head{width:100%; display:flex; align-items:center; gap:6px; padding:10px 12px; font-size:13px; color:var(--inkSoft); text-align:left; min-height:44px}
+  .otd-head .n{margin-left:auto}
+  .otd-item{display:block; width:100%; text-align:left; padding:8px 12px 10px; border-top:1px solid var(--line)}
+  .otd-when{font-size:12px; color:var(--inkSoft); display:block; margin-bottom:2px}
+  .otd-txt{font-size:14px; line-height:1.35; color:var(--ink); margin:0; overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical}
   /* Wochenansicht */
   .week-list{display:flex; flex-direction:column; gap:8px}
   .week-day{display:block; width:100%; text-align:left; border:1px solid var(--line); background:var(--card); border-radius:16px; padding:10px 12px}
@@ -138,6 +154,16 @@
   .bar-track{flex:1; height:10px; background:var(--paper); border:1px solid var(--line); border-radius:999px; overflow:hidden}
   .bar-fill{display:block; height:100%; border-radius:999px; min-width:3px}
   .bar-count{font-size:12px; color:var(--inkSoft); width:22px; text-align:right; flex:0 0 auto}
+  .moodline{padding:10px; background:var(--card); border:1px solid var(--line); border-radius:16px}
+  /* Jahres-Heatmap */
+  .hm{display:flex; flex-direction:column; gap:3px; padding:10px; background:var(--card); border:1px solid var(--line); border-radius:16px}
+  .hm-row{display:grid; grid-template-columns:26px repeat(31,1fr); gap:2px; align-items:center}
+  .hm-lab{font-size:10px; color:var(--inkSoft)}
+  .hm-cell{aspect-ratio:1/1; min-width:0; width:100%; border-radius:2px; padding:0; border:none}
+  .hm-cell.e0{background:var(--paper); box-shadow:inset 0 0 0 1px var(--line)}
+  .hm-cell.today{box-shadow:0 0 0 1.5px var(--ink)}
+  .hm-legend{display:flex; align-items:center; gap:4px; justify-content:flex-end; margin-top:6px; font-size:11px; color:var(--inkSoft)}
+  .hm-legend .sq{width:10px; height:10px; border-radius:2px; display:inline-block}
   /* Kategorien */
   .cat-card{border-radius:16px; padding:10px; background:var(--card); border:1px solid var(--line); margin-bottom:8px}
   .cat-card.dragging{opacity:.9; box-shadow:0 8px 24px rgba(0,0,0,.18); border-color:var(--ring); position:relative; z-index:5}
@@ -197,6 +223,8 @@
   ];
   var FALLBACK = { key: "_none", label: "Sonstiges", color: "#8E8B84" };
   var MARKERS = ["W", "H", "S", "B"];   // feste Tages-Markierungen (kein Text-Eintrag)
+  var MOOD_EMOJI = ["😞","😕","😐","🙂","😄"];
+  var MOOD_COLORS = ["#C0504D","#E0784E","#E1B23A","#6BA368","#4C7A6B"];
   var SWATCHES = ["#5B7DB1","#4FA0A0","#6BA368","#8E7CB0","#C86B8A","#C0504D",
                   "#E0784E","#E1B23A","#B0843F","#9C7B5A","#4C7A6B","#7E8B8E"];
   var MONTHS = ["Januar","Februar","März","April","Mai","Juni","Juli","August","September","Oktober","November","Dezember"];
@@ -303,6 +331,7 @@
     await saveCatsEnc();
     entries = await loadAllEntries();
     markers = {};
+    moods = {};
   }
   async function unlock(password){
     var a = await dbGet("prefs","auth");
@@ -319,6 +348,9 @@
     markers = {};
     var mk = await dbGet("prefs","markers");
     if(mk && mk.enc){ try{ markers = normalizeMarkers(await decJSON(sessionKey, mk.enc)); }catch(e){ markers = {}; } }
+    moods = {};
+    var md = await dbGet("prefs","moods");
+    if(md && md.enc){ try{ moods = normalizeMoods(await decJSON(sessionKey, md.enc)); }catch(e){ moods = {}; } }
     return true;
   }
   async function changePassword(oldPw, newPw){
@@ -333,11 +365,12 @@
     for(var i=0;i<entries.length;i++){ await putEntry(entries[i]); }
     await saveCatsEnc();
     await saveMarkersEnc();
+    await saveMoodsEnc();
     await dbPut("prefs", { key:"auth", salt:b64(salt), iterations:PBKDF2_ITER, verifier: await encJSON(newKey, VERIFY_TOKEN) });
     return true;
   }
   function lock(){
-    sessionKey = null; entries = []; markers = {}; S.cats = DEFAULT_CATS.slice();
+    sessionKey = null; entries = []; markers = {}; moods = {}; S.cats = DEFAULT_CATS.slice();
     S.view="calendar"; S.calMode="month"; S.menuOpen=false; S.selected=null;
     S.draftText=""; S.editingId=null; S.searchQ=""; S.searchRes=[];
     S.gate="login"; S.gateErr=""; render();
@@ -368,10 +401,14 @@
     searchRes: [],
     menuOpen: false,
     rec: false,
-    micHint: ""
+    micHint: "",
+    otdOpen: true,              // „An diesem Tag"-Karte auf-/zugeklappt
+    statsMode: "month",         // month | year
+    heatMetric: "entries"       // entries | mood (Jahres-Heatmap)
   };
   var entries = [];
   var markers = {};             // dateKey -> ["W","S",...]
+  var moods = {};               // dateKey -> 1..5
   var recognition = null;
   var toastTimer = null;
   var todayKey = keyOf(new Date());
@@ -406,6 +443,20 @@
       if(Object.keys(c).length) out[k]=c;
     });
     return out;
+  }
+  async function saveMoodsEnc(){ await dbPut("prefs", { key:"moods", enc: await encJSON(sessionKey, moods) }); }
+  function normalizeMoods(obj){
+    var out={};
+    Object.keys(obj||{}).forEach(function(k){
+      if(!/^\d{4}-\d{2}-\d{2}$/.test(k)) return;
+      var v=parseInt(obj[k],10);
+      if(v>=1 && v<=5) out[k]=v;
+    });
+    return out;
+  }
+  function setMood(dk, v){
+    if(moods[dk]===v) delete moods[dk]; else moods[dk]=v;
+    saveMoodsEnc();
   }
 
   // ---------- Icons ----------
@@ -531,7 +582,8 @@
       var cls = "day"+(g.inMonth?"":" out")+(g.key===todayKey?" today":"");
       var mk = markersFor(g.key);
       var marksSpan = mk.length ? '<span class="marks">'+mk.join(" ")+'</span>' : '';
-      return '<button class="'+cls+'" data-day="'+g.key+'">'+
+      var moodSpan = moods[g.key] ? '<span class="mood-mini">'+MOOD_EMOJI[moods[g.key]-1]+'</span>' : '';
+      return '<button class="'+cls+'" data-day="'+g.key+'">'+moodSpan+
              '<span class="num">'+g.date.getDate()+'</span>'+
              '<span class="dots">'+dots+'</span>'+marksSpan+'</button>';
     }).join("");
@@ -567,7 +619,8 @@
       rows += '<button class="week-day'+(isToday?" today":"")+((shown.length||wm.length)?"":" empty")+'" data-day="'+dk+'">'+
         '<div class="week-day-head">'+
           '<span class="week-dow">'+WD_LONG[i]+'</span>'+
-          '<span class="week-date">'+d.getDate()+". "+MONTHS_SHORT[d.getMonth()]+'</span>'+wmSpan+cnt+
+          '<span class="week-date">'+d.getDate()+". "+MONTHS_SHORT[d.getMonth()]+'</span>'+
+          (moods[dk]?'<span class="week-mood">'+MOOD_EMOJI[moods[dk]-1]+'</span>':'')+wmSpan+cnt+
         '</div>'+body+'</button>';
     }
     return '<div class="week-list">'+rows+'</div>';
@@ -598,10 +651,55 @@
       }).length;
       title = MONTHS[S.month]+' <span class="muted">'+S.year+'</span>';
       subtitle = monthCount+" "+(monthCount===1?"Eintrag":"Einträge");
+      var streak = computeCurrentStreak();
+      if(streak>=2) subtitle += " · 🔥 "+streak+" Tage in Folge";
       body = monthGridHTML();
     }
     return headerHTML()+
       '<main><div class="cal-wrap">'+toolbarHTML(title, subtitle)+body+'</div></main>';
+  }
+
+  // ---------- Schreibserie / „An diesem Tag" ----------
+  function computeCurrentStreak(){
+    var set={}; entries.forEach(function(e){ set[e.date]=true; });
+    var d=new Date();
+    if(!set[keyOf(d)]) d=addDays(d,-1);   // heute noch leer? Serie ab gestern zählen
+    var n=0;
+    while(set[keyOf(d)]){ n++; d=addDays(d,-1); }
+    return n;
+  }
+  function onThisDayItems(dk){
+    if(!entries.length) return [];
+    var d=parseKey(dk), out=[];
+    var minYear=99999;
+    entries.forEach(function(e){ var y=parseInt(e.date.slice(0,4),10); if(y<minYear) minYear=y; });
+    function sameDay(y,m){   // Datums-Überlauf abfangen (29. Feb, 31. in kurzem Monat)
+      var t=new Date(y,m,d.getDate());
+      if(t.getDate()!==d.getDate()){
+        if(m===1 && d.getDate()===29) return new Date(y,1,28);
+        return null;
+      }
+      return t;
+    }
+    function pushIf(t,label){
+      if(!t) return;
+      var k=keyOf(t);
+      if(k>=dk) return;
+      var list=entriesFor(k);
+      if(list.length) out.push({ label:label, key:k, list:list });
+    }
+    for(var y=d.getFullYear()-1; y>=minYear && out.length<5; y--){
+      var back=d.getFullYear()-y;
+      pushIf(sameDay(y,d.getMonth()), back===1 ? "Vor 1 Jahr" : "Vor "+back+" Jahren");
+    }
+    var monthsBack=[1,3,6];
+    for(var i=0;i<monthsBack.length && out.length<5;i++){
+      var mb=monthsBack[i], ym=d.getFullYear(), mm=d.getMonth()-mb;
+      while(mm<0){ mm+=12; ym--; }
+      pushIf(sameDay(ym,mm), mb===1 ? "Vor 1 Monat" : "Vor "+mb+" Monaten");
+    }
+    out.sort(function(a,b){ return a.key<b.key ? 1 : -1; });
+    return out;
   }
 
   // ---------- Statistik ----------
@@ -638,8 +736,92 @@
              catStats:catStats, maxCat:maxCat, perDay:perDay, maxDay:maxDay, busiestWd:busiestWd, maxWd:maxWd };
   }
 
+  function moodTrendHTML(y,m){
+    var daysInMonth = new Date(y,m+1,0).getDate();
+    var pts=[], sum=0;
+    for(var day=1; day<=daysInMonth; day++){
+      var v = moods[y+"-"+pad(m+1)+"-"+pad(day)];
+      if(v){ pts.push({d:day, v:v}); sum+=v; }
+    }
+    var title = '<div class="stat-section-title">Stimmungsverlauf'+
+      (pts.length ? ' · Ø '+MOOD_EMOJI[Math.round(sum/pts.length)-1] : '')+'</div>';
+    if(!pts.length) return title+'<p class="note" style="margin-top:0">Noch keine Stimmung erfasst.</p>';
+    var W=310, H=80, padX=8, padY=10;
+    function X(day){ return (padX + (daysInMonth>1 ? (day-1)/(daysInMonth-1)*(W-2*padX) : 0)).toFixed(1); }
+    function Y(v){ return (H-padY - (v-1)/4*(H-2*padY)).toFixed(1); }
+    var segs=[], seg=[];
+    pts.forEach(function(p){
+      if(seg.length && p.d !== seg[seg.length-1].d+1){ segs.push(seg); seg=[]; }
+      seg.push(p);
+    });
+    if(seg.length) segs.push(seg);
+    var svg = '<svg viewBox="0 0 '+W+' '+H+'" width="100%" height="'+H+'" role="img" aria-label="Stimmungsverlauf">';
+    segs.forEach(function(sg){
+      if(sg.length>1){
+        var pl = sg.map(function(p){ return X(p.d)+","+Y(p.v); }).join(" ");
+        svg += '<polyline points="'+pl+'" fill="none" stroke="var(--ring)" stroke-width="1.5"/>';
+      }
+    });
+    pts.forEach(function(p){
+      svg += '<circle cx="'+X(p.d)+'" cy="'+Y(p.v)+'" r="3.2" fill="'+MOOD_COLORS[p.v-1]+'"/>';
+    });
+    svg += '</svg>';
+    return title+'<div class="moodline">'+svg+'</div>';
+  }
+
+  function yearHeatHTML(y){
+    var byMood = S.heatMetric==="mood";
+    var counts={}, total=0, ys=String(y);
+    entries.forEach(function(e){ if(e.date.slice(0,4)===ys){ counts[e.date]=(counts[e.date]||0)+1; total++; } });
+    var moodCnt=0; Object.keys(moods).forEach(function(k){ if(k.slice(0,4)===ys) moodCnt++; });
+    var tk = keyOf(new Date());
+    var rows="";
+    for(var m=0;m<12;m++){
+      var dim = new Date(y,m+1,0).getDate();
+      var cells="";
+      for(var day=1;day<=31;day++){
+        if(day>dim){ cells+="<span></span>"; continue; }
+        var k = y+"-"+pad(m+1)+"-"+pad(day);
+        var cls="hm-cell", style="";
+        if(byMood){
+          if(moods[k]) style="background:"+MOOD_COLORS[moods[k]-1]; else cls+=" e0";
+        } else {
+          var c = counts[k]||0;
+          if(c===0) cls+=" e0";
+          else style="background:"+(c===1?"#24201955":(c<=3?"#242019AA":"var(--ink)"));
+        }
+        if(k===tk) cls+=" today";
+        cells += '<button class="'+cls+'" data-day="'+k+'" style="'+style+'" aria-label="'+day+'. '+MONTHS[m]+' '+y+'"></button>';
+      }
+      rows += '<div class="hm-row"><span class="hm-lab">'+MONTHS_SHORT[m]+'</span>'+cells+'</div>';
+    }
+    var legend = byMood
+      ? '<div class="hm-legend">'+MOOD_EMOJI.map(function(em,i){
+          return '<span class="sq" style="background:'+MOOD_COLORS[i]+'" title="'+em+'"></span>';
+        }).join("")+'</div>'
+      : '<div class="hm-legend">weniger '+
+        '<span class="sq" style="background:var(--paper); box-shadow:inset 0 0 0 1px var(--line)"></span>'+
+        '<span class="sq" style="background:#24201955"></span>'+
+        '<span class="sq" style="background:#242019AA"></span>'+
+        '<span class="sq" style="background:var(--ink)"></span> mehr</div>';
+    var daysWith = Object.keys(counts).length;
+    var tiles = '<div class="stat-grid">'+
+      '<div class="stat-tile"><div class="stat-num">'+total+'</div><div class="stat-label">'+(total===1?"Eintrag":"Einträge")+'</div></div>'+
+      '<div class="stat-tile"><div class="stat-num">'+daysWith+'</div><div class="stat-label">'+(daysWith===1?"Tag":"Tage")+' mit Eintrag</div></div>'+
+    '</div>';
+    var metricSeg = '<div class="controls" style="justify-content:center; margin:12px 0 10px">'+
+      '<div class="seg" role="tablist" aria-label="Messwert">'+
+        '<button class="'+(!byMood?"on":"")+'" data-act="heat-entries">Einträge</button>'+
+        '<button class="'+(byMood?"on":"")+'" data-act="heat-mood">Stimmung</button>'+
+      '</div></div>';
+    var note = (byMood ? moodCnt===0 : total===0)
+      ? '<p class="note">'+(byMood?"Keine Stimmungen in diesem Jahr.":"Keine Einträge in diesem Jahr.")+'</p>' : '';
+    return tiles+metricSeg+'<div class="hm">'+rows+legend+'</div>'+note;
+  }
+
   function statsHTML(){
     var y=S.statsYear, m=S.statsMonth;
+    var isYear = S.statsMode==="year";
     var st = computeStats(y,m);
     var isCurMonth = (y===new Date().getFullYear() && m===new Date().getMonth());
     var todayNum = new Date().getDate();
@@ -673,6 +855,14 @@
         }).join("");
     }
 
+    var navTitle = isYear ? String(y) : MONTHS[m]+' <span class="muted">'+y+'</span>';
+    var modeSeg = '<div class="controls" style="justify-content:center; margin:0 0 10px">'+
+      '<div class="seg" role="tablist" aria-label="Zeitraum">'+
+        '<button class="'+(!isYear?"on":"")+'" data-act="stats-mode-month">Monat</button>'+
+        '<button class="'+(isYear?"on":"")+'" data-act="stats-mode-year">Jahr</button>'+
+      '</div></div>';
+    var content = isYear ? yearHeatHTML(y) : tiles + dayBars + moodTrendHTML(y,m) + catBars;
+
     return headerHTML()+
     '<main>'+
       '<div class="sub-head">'+
@@ -681,11 +871,11 @@
       '</div>'+
       '<div class="scroll">'+
         '<div class="month-nav" style="margin-top:0">'+
-          '<button class="iconbtn" data-act="stats-prev" aria-label="Vorheriger Monat">'+icon("ChevronLeft",22)+'</button>'+
-          '<h2 class="month-title" style="font-size:20px">'+MONTHS[m]+' <span class="muted">'+y+'</span></h2>'+
-          '<button class="iconbtn" data-act="stats-next" aria-label="Nächster Monat">'+icon("ChevronRight",22)+'</button>'+
+          '<button class="iconbtn" data-act="stats-prev" aria-label="'+(isYear?"Vorheriges Jahr":"Vorheriger Monat")+'">'+icon("ChevronLeft",22)+'</button>'+
+          '<h2 class="month-title" style="font-size:20px">'+navTitle+'</h2>'+
+          '<button class="iconbtn" data-act="stats-next" aria-label="'+(isYear?"Nächstes Jahr":"Nächster Monat")+'">'+icon("ChevronRight",22)+'</button>'+
         '</div>'+
-        tiles + dayBars + catBars +
+        modeSeg + content +
         '<div style="height:16px"></div>'+
       '</div>'+
     '</main>';
@@ -725,14 +915,36 @@
       return '<span class="mstep">'+
         '<button class="mtoggle'+(n>0?" on":"")+'" data-mark-inc="'+L+'" aria-label="'+L+' hinzufügen'+(n?" (aktuell "+n+")":"")+'">'+L+badge+'</button>'+
         dec+'</span>'; }).join("");
+    var mv = moods[S.selected]||0;
+    var moodBtns = MOOD_EMOJI.map(function(em,i){
+      return '<button class="mood-btn'+(mv===i+1?" on":"")+'" data-mood="'+(i+1)+'" aria-label="Stimmung '+(i+1)+' von 5" aria-pressed="'+(mv===i+1)+'">'+em+'</button>';
+    }).join("");
+    var curStreak = S.selected===keyOf(new Date()) ? computeCurrentStreak() : 0;
+    var streakPill = curStreak>0 ? '<span class="streak-pill" title="Schreibserie">🔥 '+curStreak+'</span>' : '';
+    var otd = onThisDayItems(S.selected);
+    var otdHTML = "";
+    if(otd.length){
+      otdHTML = '<div class="otd-card">'+
+        '<button class="otd-head" data-act="toggle-otd" aria-expanded="'+S.otdOpen+'">An diesem Tag <span class="muted">('+otd.length+')</span><span class="n">'+(S.otdOpen?"▾":"▸")+'</span></button>'+
+        (S.otdOpen ? otd.map(function(g){
+          var gd = parseKey(g.key);
+          var when = g.label+' · '+gd.getDate()+'. '+MONTHS[gd.getMonth()]+' '+gd.getFullYear();
+          var more = g.list.length>1 ? ' · +'+(g.list.length-1)+' weitere' : '';
+          return '<button class="otd-item" data-day="'+g.key+'">'+
+            '<span class="otd-when">'+esc(when+more)+'</span>'+
+            '<p class="otd-txt">'+esc(g.list[0].text)+'</p></button>';
+        }).join("") : '')+
+      '</div>';
+    }
     return headerHTML()+
     '<main>'+
       '<div class="sub-head">'+
         '<button class="iconbtn sm" data-act="to-calendar" aria-label="Zurück" style="margin-left:-6px">'+icon("ArrowLeft",22)+'</button>'+
-        '<h2 class="sub-title">'+esc(fmtLongDate(S.selected))+'</h2>'+
+        '<h2 class="sub-title">'+esc(fmtLongDate(S.selected))+'</h2>'+streakPill+
       '</div>'+
       '<div class="marks-row"><span class="marks-label">Markierungen</span><div class="marks-toggles">'+mtoggles+'</div></div>'+
-      '<div class="scroll" id="dayScroll">'+body+'</div>'+
+      '<div class="mood-row"><span class="marks-label">Stimmung</span><div class="mood-btns">'+moodBtns+'</div></div>'+
+      '<div class="scroll" id="dayScroll">'+otdHTML+body+'</div>'+
       '<div class="composer">'+
         '<div class="chips">'+chipsHTML(S.draftCat,null,false)+'</div>'+
         (S.micHint ? '<p class="hint">'+esc(S.micHint)+'</p>' : '')+
@@ -912,6 +1124,8 @@
 
   // ---------- Aktionen ----------
   function openDay(dk){
+    var d = parseKey(dk);
+    S.year = d.getFullYear(); S.month = d.getMonth(); S.weekAnchor = dk;
     S.selected = dk; S.editingId = null; S.draftText = "";
     if(!S.cats.some(function(c){ return c.key===S.draftCat; })) S.draftCat = S.cats[0] ? S.cats[0].key : "privat";
     S.view = "day"; render();
@@ -919,7 +1133,7 @@
   function goToday(){
     var n = new Date();
     if(S.calMode==="week"){ S.weekAnchor = keyOf(n); render(); }
-    else { S.year=n.getFullYear(); S.month=n.getMonth(); openDay(keyOf(n)); }
+    else { openDay(keyOf(n)); }
   }
   function calShift(dir){
     if(S.calMode==="week"){
@@ -945,6 +1159,7 @@
     S.view="stats"; S.menuOpen=false; render();
   }
   function statsShift(dir){
+    if(S.statsMode==="year"){ S.statsYear += dir; render(); return; }
     S.statsMonth += dir;
     if(S.statsMonth<0){ S.statsMonth=11; S.statsYear--; }
     else if(S.statsMonth>11){ S.statsMonth=0; S.statsYear++; }
@@ -1007,7 +1222,7 @@
   }
 
   function exportJSON(){
-    var payload = { app:"tagebuch", version:1, exportedAt:new Date().toISOString(), categories:S.cats, markers:markers, entries:entries.slice() };
+    var payload = { app:"tagebuch", version:2, exportedAt:new Date().toISOString(), categories:S.cats, markers:markers, moods:moods, entries:entries.slice() };
     var blob = new Blob([JSON.stringify(payload,null,2)], { type:"application/json" });
     var a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
@@ -1035,6 +1250,11 @@
         var norm = normalizeMarkers(data.markers);
         Object.keys(norm).forEach(function(k){ markers[k]=norm[k]; });
         await saveMarkersEnc();
+      }
+      if(data.moods && typeof data.moods==="object" && !Array.isArray(data.moods)){
+        var nm = normalizeMoods(data.moods);
+        Object.keys(nm).forEach(function(k){ moods[k]=nm[k]; });
+        await saveMoodsEnc();
       }
       S.menuOpen=false; render(); flash(added+" Einträge importiert");
     } catch(err){ flash("Import fehlgeschlagen – ungültige Datei"); }
@@ -1147,17 +1367,18 @@
 
   // ---------- Event-Delegation (Klicks) ----------
   appEl.addEventListener("click", function(ev){
-    var t = ev.target.closest("[data-act],[data-day],[data-edit],[data-del],[data-chip],[data-mark-inc],[data-mark-dec],[data-goto],[data-colortoggle],[data-recolor],[data-catdel-ask],[data-catdel-yes],[data-catdel-no]");
+    var t = ev.target.closest("[data-act],[data-day],[data-edit],[data-del],[data-chip],[data-mark-inc],[data-mark-dec],[data-mood],[data-goto],[data-colortoggle],[data-recolor],[data-catdel-ask],[data-catdel-yes],[data-catdel-no]");
     if(!t) return;
 
     if(t.hasAttribute("data-mark-inc")){ if(S.selected){ incMarker(S.selected, t.getAttribute("data-mark-inc"), 1); render(); } return; }
     if(t.hasAttribute("data-mark-dec")){ if(S.selected){ incMarker(S.selected, t.getAttribute("data-mark-dec"), -1); render(); } return; }
+    if(t.hasAttribute("data-mood")){ if(S.selected){ setMood(S.selected, parseInt(t.getAttribute("data-mood"),10)); render(); } return; }
     if(t.hasAttribute("data-day")){ openDay(t.getAttribute("data-day")); return; }
     if(t.hasAttribute("data-edit")){ startEdit(t.getAttribute("data-edit")); return; }
     if(t.hasAttribute("data-del")){ deleteEntry(t.getAttribute("data-del")); return; }
     if(t.hasAttribute("data-goto")){
       var e = entries.find(function(x){ return x.id===t.getAttribute("data-goto"); });
-      if(e){ var d=parseKey(e.date); S.year=d.getFullYear(); S.month=d.getMonth(); S.weekAnchor=e.date; openDay(e.date); }
+      if(e){ openDay(e.date); }
       return;
     }
     if(t.hasAttribute("data-chip")){
@@ -1189,6 +1410,11 @@
       case "mode-month": S.calMode="month"; render(); break;
       case "mode-week": S.calMode="week"; render(); break;
       case "go-today": goToday(); break;
+      case "toggle-otd": S.otdOpen=!S.otdOpen; render(); break;
+      case "stats-mode-month": S.statsMode="month"; render(); break;
+      case "stats-mode-year": S.statsMode="year"; render(); break;
+      case "heat-entries": S.heatMetric="entries"; render(); break;
+      case "heat-mood": S.heatMetric="mood"; render(); break;
       case "cancel-edit": cancelEdit(); break;
       case "add-cat": addCat(); break;
       case "export": exportJSON(); break;
