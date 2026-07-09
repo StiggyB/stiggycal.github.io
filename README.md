@@ -16,6 +16,8 @@ Portiert aus dem ursprünglichen Claude-Artifact (`tagebuch.jsx`), aber komplett
 - **Wischen** (Swipe) für vorigen/nächsten Tag, Monat bzw. Woche
 - Frei konfigurierbare Kategorien (Name + Farbe), **per Drag sortierbar**;
   Kategorie-Chips füllen die Bildschirmbreite (mehrere Reihen)
+- **Tages-Markierungen W · H · S · B** – feste Buchstaben ohne Text-Eintrag,
+  pro Tag in der Tagesansicht umschaltbar, klein unten im Kalenderfeld angezeigt
 - Volltext-Suche über alle Einträge
 - **JSON-Export/-Import** – Format identisch zum Claude-Artifact (`{ categories, entries }`),
   d. h. alte Exporte lassen sich hier importieren

@@ -76,6 +76,14 @@
   .day .num{font-size:14px; color:var(--ink)}
   .day.today .num{font-weight:700}
   .day .dots{display:flex; gap:2px; margin-top:4px; flex-wrap:wrap; justify-content:center; padding:0 4px}
+  .day .marks{margin-top:auto; padding-top:2px; font-size:9px; line-height:1; font-weight:700; letter-spacing:1.5px; color:var(--inkSoft)}
+  /* Tages-Markierungen (W H S B) */
+  .marks-row{display:flex; align-items:center; gap:10px; padding:8px 16px; border-bottom:1px solid var(--line)}
+  .marks-label{font-size:12px; color:var(--inkSoft)}
+  .marks-toggles{display:flex; gap:6px; margin-left:auto}
+  .mtoggle{width:36px; height:36px; border-radius:10px; border:1px solid var(--line); color:var(--inkSoft); font-weight:700; font-size:14px; display:inline-flex; align-items:center; justify-content:center}
+  .mtoggle.on{background:var(--ink); color:var(--card); border-color:var(--ink)}
+  .week-marks{font-size:11px; font-weight:700; letter-spacing:1.5px; color:var(--inkSoft); margin-left:8px}
   /* Wochenansicht */
   .week-list{display:flex; flex-direction:column; gap:8px}
   .week-day{display:block; width:100%; text-align:left; border:1px solid var(--line); background:var(--card); border-radius:16px; padding:10px 12px}
@@ -185,6 +193,7 @@
     { key: "gedanke",   label: "Gedanke",   color: "#8E7CB0" }
   ];
   var FALLBACK = { key: "_none", label: "Sonstiges", color: "#8E8B84" };
+  var MARKERS = ["W", "H", "S", "B"];   // feste Tages-Markierungen (kein Text-Eintrag)
   var SWATCHES = ["#5B7DB1","#4FA0A0","#6BA368","#8E7CB0","#C86B8A","#C0504D",
                   "#E0784E","#E1B23A","#B0843F","#9C7B5A","#4C7A6B","#7E8B8E"];
   var MONTHS = ["Januar","Februar","März","April","Mai","Juni","Juli","August","September","Oktober","November","Dezember"];
@@ -290,6 +299,7 @@
     S.draftCat = S.cats[0] ? S.cats[0].key : "privat";
     await saveCatsEnc();
     entries = await loadAllEntries();
+    markers = {};
   }
   async function unlock(password){
     var a = await dbGet("prefs","auth");
@@ -303,6 +313,9 @@
     else if(c && Array.isArray(c.value) && c.value.length){ S.cats = c.value; await saveCatsEnc(); }
     S.draftCat = S.cats[0] ? S.cats[0].key : "privat";
     entries = await loadAllEntries();
+    markers = {};
+    var mk = await dbGet("prefs","markers");
+    if(mk && mk.enc){ try{ markers = (await decJSON(sessionKey, mk.enc)) || {}; }catch(e){ markers = {}; } }
     return true;
   }
   async function changePassword(oldPw, newPw){
@@ -316,11 +329,12 @@
     sessionKey = newKey;                       // ab jetzt mit neuem Schlüssel schreiben
     for(var i=0;i<entries.length;i++){ await putEntry(entries[i]); }
     await saveCatsEnc();
+    await saveMarkersEnc();
     await dbPut("prefs", { key:"auth", salt:b64(salt), iterations:PBKDF2_ITER, verifier: await encJSON(newKey, VERIFY_TOKEN) });
     return true;
   }
   function lock(){
-    sessionKey = null; entries = []; S.cats = DEFAULT_CATS.slice();
+    sessionKey = null; entries = []; markers = {}; S.cats = DEFAULT_CATS.slice();
     S.view="calendar"; S.calMode="month"; S.menuOpen=false; S.selected=null;
     S.draftText=""; S.editingId=null; S.searchQ=""; S.searchRes=[];
     S.gate="login"; S.gateErr=""; render();
@@ -354,6 +368,7 @@
     micHint: ""
   };
   var entries = [];
+  var markers = {};             // dateKey -> ["W","S",...]
   var recognition = null;
   var toastTimer = null;
   var todayKey = keyOf(new Date());
@@ -365,6 +380,15 @@
 
   function findCat(k){ for(var i=0;i<S.cats.length;i++) if(S.cats[i].key===k) return S.cats[i]; return FALLBACK; }
   function entriesFor(dk){ return entries.filter(function(e){ return e.date===dk; }); }
+  function markersFor(dk){ return markers[dk] || []; }
+  async function saveMarkersEnc(){ await dbPut("prefs", { key:"markers", enc: await encJSON(sessionKey, markers) }); }
+  function toggleMarker(dk, letter){
+    var arr = markers[dk] ? markers[dk].slice() : [];
+    var i = arr.indexOf(letter);
+    if(i>=0) arr.splice(i,1); else { arr.push(letter); arr.sort(function(a,b){ return MARKERS.indexOf(a)-MARKERS.indexOf(b); }); }
+    if(arr.length) markers[dk]=arr; else delete markers[dk];
+    saveMarkersEnc();
+  }
 
   // ---------- Icons ----------
   var ICONS = {
@@ -487,9 +511,11 @@
       cats = cats.slice(0,3);
       var dots = cats.map(function(k){ return '<span class="dot dot-sm" style="background:'+findCat(k).color+'"></span>'; }).join("");
       var cls = "day"+(g.inMonth?"":" out")+(g.key===todayKey?" today":"");
+      var mk = markersFor(g.key);
+      var marksSpan = mk.length ? '<span class="marks">'+mk.join(" ")+'</span>' : '';
       return '<button class="'+cls+'" data-day="'+g.key+'">'+
              '<span class="num">'+g.date.getDate()+'</span>'+
-             '<span class="dots">'+dots+'</span></button>';
+             '<span class="dots">'+dots+'</span>'+marksSpan+'</button>';
     }).join("");
     return '<div class="wd-head">'+WD.map(function(w){ return '<span>'+w+'</span>'; }).join("")+'</div>'+
            '<div class="grid">'+cells+'</div>';
@@ -518,10 +544,12 @@
         }).join("");
       }
       var cnt = shown.length ? '<span class="week-count">'+shown.length+'</span>' : '';
-      rows += '<button class="week-day'+(isToday?" today":"")+(shown.length?"":" empty")+'" data-day="'+dk+'">'+
+      var wm = markersFor(dk);
+      var wmSpan = wm.length ? '<span class="week-marks">'+wm.join(" ")+'</span>' : '';
+      rows += '<button class="week-day'+(isToday?" today":"")+((shown.length||wm.length)?"":" empty")+'" data-day="'+dk+'">'+
         '<div class="week-day-head">'+
           '<span class="week-dow">'+WD_LONG[i]+'</span>'+
-          '<span class="week-date">'+d.getDate()+". "+MONTHS_SHORT[d.getMonth()]+'</span>'+cnt+
+          '<span class="week-date">'+d.getDate()+". "+MONTHS_SHORT[d.getMonth()]+'</span>'+wmSpan+cnt+
         '</div>'+body+'</button>';
     }
     return '<div class="week-list">'+rows+'</div>';
@@ -672,12 +700,16 @@
       }).join("");
     }
     var editing = !!S.editingId;
+    var mset = markersFor(S.selected);
+    var mtoggles = MARKERS.map(function(L){ var on=mset.indexOf(L)>=0;
+      return '<button class="mtoggle'+(on?" on":"")+'" data-mark="'+L+'" aria-pressed="'+(on?"true":"false")+'" aria-label="Markierung '+L+'">'+L+'</button>'; }).join("");
     return headerHTML()+
     '<main>'+
       '<div class="sub-head">'+
         '<button class="iconbtn sm" data-act="to-calendar" aria-label="Zurück" style="margin-left:-6px">'+icon("ArrowLeft",22)+'</button>'+
         '<h2 class="sub-title">'+esc(fmtLongDate(S.selected))+'</h2>'+
       '</div>'+
+      '<div class="marks-row"><span class="marks-label">Markierungen</span><div class="marks-toggles">'+mtoggles+'</div></div>'+
       '<div class="scroll" id="dayScroll">'+body+'</div>'+
       '<div class="composer">'+
         '<div class="chips">'+chipsHTML(S.draftCat,null,false)+'</div>'+
@@ -953,7 +985,7 @@
   }
 
   function exportJSON(){
-    var payload = { app:"tagebuch", version:1, exportedAt:new Date().toISOString(), categories:S.cats, entries:entries.slice() };
+    var payload = { app:"tagebuch", version:1, exportedAt:new Date().toISOString(), categories:S.cats, markers:markers, entries:entries.slice() };
     var blob = new Blob([JSON.stringify(payload,null,2)], { type:"application/json" });
     var a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
@@ -976,6 +1008,13 @@
         var rec = { id:e.id || uid(), date:e.date, ts:e.ts || Date.now(), text:e.text, cat:e.cat || (S.cats[0] && S.cats[0].key) || "privat" };
         if(existing[rec.id]) continue;
         existing[rec.id]=true; entries.push(rec); await putEntry(rec); added++;
+      }
+      if(data.markers && typeof data.markers==="object" && !Array.isArray(data.markers)){
+        Object.keys(data.markers).forEach(function(k){
+          var v = data.markers[k];
+          if(Array.isArray(v)){ var f = v.filter(function(L){ return MARKERS.indexOf(L)>=0; }); if(f.length) markers[k]=f; }
+        });
+        await saveMarkersEnc();
       }
       S.menuOpen=false; render(); flash(added+" Einträge importiert");
     } catch(err){ flash("Import fehlgeschlagen – ungültige Datei"); }
@@ -1088,9 +1127,10 @@
 
   // ---------- Event-Delegation (Klicks) ----------
   appEl.addEventListener("click", function(ev){
-    var t = ev.target.closest("[data-act],[data-day],[data-edit],[data-del],[data-chip],[data-goto],[data-colortoggle],[data-recolor],[data-catdel-ask],[data-catdel-yes],[data-catdel-no]");
+    var t = ev.target.closest("[data-act],[data-day],[data-edit],[data-del],[data-chip],[data-mark],[data-goto],[data-colortoggle],[data-recolor],[data-catdel-ask],[data-catdel-yes],[data-catdel-no]");
     if(!t) return;
 
+    if(t.hasAttribute("data-mark")){ if(S.selected){ toggleMarker(S.selected, t.getAttribute("data-mark")); render(); } return; }
     if(t.hasAttribute("data-day")){ openDay(t.getAttribute("data-day")); return; }
     if(t.hasAttribute("data-edit")){ startEdit(t.getAttribute("data-edit")); return; }
     if(t.hasAttribute("data-del")){ deleteEntry(t.getAttribute("data-del")); return; }
