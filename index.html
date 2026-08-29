@@ -298,7 +298,7 @@
 
   // ---------- Verschlüsselte Persistenz ----------
   async function putEntry(rec){
-    var enc = await encJSON(sessionKey, { date:rec.date, ts:rec.ts, text:rec.text, cat:rec.cat });
+    var enc = await encJSON(sessionKey, { date:rec.date, ts:rec.ts, text:rec.text, cat:rec.cat, mod:rec.mod });
     await dbPut("entries", { id:rec.id, enc:enc });
   }
   async function loadAllEntries(){
@@ -306,12 +306,375 @@
     var out = [];
     for(var i=0;i<raw.length;i++){
       var r = raw[i];
-      if(r && r.enc){ try{ var p = await decJSON(sessionKey, r.enc); out.push({ id:r.id, date:p.date, ts:p.ts, text:p.text, cat:p.cat }); }catch(e){} }
+      if(r && r.enc){ try{ var p = await decJSON(sessionKey, r.enc); out.push({ id:r.id, date:p.date, ts:p.ts, text:p.text, cat:p.cat, mod:p.mod||p.ts }); }catch(e){} }
     }
     return out;
   }
   async function saveCatsEnc(){
     await dbPut("prefs", { key:"cats", enc: await encJSON(sessionKey, S.cats) });
+  }
+
+  // ---------- Online-Speicher (Sync mit privatem GitHub-Repository) ----------
+  // Hochgeladen wird ausschließlich Ciphertext: Die Nutzdaten sind mit einem
+  // zufälligen Sync-Schlüssel verschlüsselt, der selbst nur „verpackt"
+  // (mit dem Tagebuch-Passwort verschlüsselt) in der Sync-Datei liegt.
+  var SYNC_FILE = "tagebuch-sync.json";
+  var SYNC_DEBOUNCE_MS = 4000;
+  var SYNC_REFRESH_MS = 60000;
+  var SY = { cfg:null, key:null, busy:false, again:false, dirty:false,
+             lastOk:0, lastErr:"", timer:null, warned:false };
+  var syncMeta = { tomb:{}, marksTs:{}, moodsTs:{}, catsMod:0 };
+
+  function freshSyncMeta(){ return { tomb:{}, marksTs:{}, moodsTs:{}, catsMod:0 }; }
+  function normalizeSyncMeta(o){
+    o = (o && typeof o==="object") ? o : {};
+    function numMap(m){
+      var out={}; if(!m || typeof m!=="object") return out;
+      Object.keys(m).forEach(function(k){ var v=+m[k]; if(v>0) out[k]=v; });
+      return out;
+    }
+    return { tomb:numMap(o.tomb), marksTs:numMap(o.marksTs), moodsTs:numMap(o.moodsTs),
+             catsMod:(+o.catsMod>0 ? +o.catsMod : 0) };
+  }
+  async function saveSyncMetaEnc(){
+    if(sessionKey) await dbPut("prefs", { key:"syncmeta", enc: await encJSON(sessionKey, syncMeta) });
+  }
+  async function saveSyncCfgEnc(){
+    if(!sessionKey) return;
+    if(SY.cfg) await dbPut("prefs", { key:"sync", enc: await encJSON(sessionKey, SY.cfg) });
+    else await dbDelete("prefs","sync");
+  }
+  async function loadSyncState(){
+    syncMeta = freshSyncMeta();
+    SY.cfg=null; SY.key=null; SY.lastOk=0; SY.lastErr=""; SY.dirty=false; SY.warned=false;
+    var m = await dbGet("prefs","syncmeta");
+    if(m && m.enc){ try{ syncMeta = normalizeSyncMeta(await decJSON(sessionKey, m.enc)); }catch(e){} }
+    var c = await dbGet("prefs","sync");
+    if(c && c.enc){
+      try{
+        var cfg = await decJSON(sessionKey, c.enc);
+        if(cfg && cfg.owner && cfg.repo && cfg.token && cfg.keyB64 && cfg.wrap){
+          SY.cfg = cfg;
+          SY.key = await subtle.importKey("raw", fromB64(cfg.keyB64), "AES-GCM", false, ["encrypt","decrypt"]);
+        }
+      }catch(e){}
+    }
+  }
+  function markDirty(){
+    SY.dirty = true;
+    if(!SY.cfg || !sessionKey) return;
+    if(SY.timer) clearTimeout(SY.timer);
+    SY.timer = setTimeout(function(){ SY.timer=null; syncNow("auto"); }, SYNC_DEBOUNCE_MS);
+  }
+
+  // --- GitHub-Contents-API (api.github.com erlaubt CORS) ---
+  function ghHeaders(token){
+    return { "Authorization":"Bearer "+token, "Accept":"application/vnd.github+json",
+             "X-GitHub-Api-Version":"2022-11-28" };
+  }
+  function ghBase(cfg){
+    return "https://api.github.com/repos/"+encodeURIComponent(cfg.owner)+"/"+encodeURIComponent(cfg.repo);
+  }
+  async function ghGetRepo(cfg){
+    var r = await fetch(ghBase(cfg), { headers: ghHeaders(cfg.token) });
+    return { status:r.status, json: r.ok ? await r.json() : null };
+  }
+  async function ghGetFile(cfg){
+    var r = await fetch(ghBase(cfg)+"/contents/"+SYNC_FILE, { headers: ghHeaders(cfg.token), cache:"no-store" });
+    if(r.status===404) return { status:404 };
+    if(!r.ok) return { status:r.status };
+    var j = await r.json();
+    var b64c = j.content;
+    if((!b64c || !String(b64c).trim()) && j.git_url){   // >1 MB liefert die Contents-API leer -> Blob-API
+      var rb = await fetch(j.git_url, { headers: ghHeaders(cfg.token), cache:"no-store" });
+      if(!rb.ok) return { status:rb.status };
+      b64c = (await rb.json()).content;
+    }
+    var file = null;
+    try{ file = JSON.parse(new TextDecoder().decode(fromB64(String(b64c||"").replace(/\s+/g,"")))); }catch(e){}
+    return { status:200, sha:j.sha, file:file };
+  }
+  async function ghPutFile(cfg, fileObj, sha){
+    var body = { message:"Tagebuch-Sync "+new Date().toISOString(),
+                 content: b64(new TextEncoder().encode(JSON.stringify(fileObj))) };
+    if(sha) body.sha = sha;
+    var r = await fetch(ghBase(cfg)+"/contents/"+SYNC_FILE,
+      { method:"PUT", headers: ghHeaders(cfg.token), body: JSON.stringify(body) });
+    if(!r.ok) return { status:r.status };
+    var j = await r.json();
+    return { status:200, sha: j.content && j.content.sha };
+  }
+  function syncErrText(status){
+    if(status===401) return 'Token ungültig oder abgelaufen – unter „Online-Speicher" erneuern.';
+    if(status===403) return "Zugriff verweigert – Token-Berechtigung prüfen (Contents: Read and write).";
+    if(status===404) return "Repository nicht gefunden – Name und Token-Zugriff prüfen.";
+    return "GitHub meldet Fehler "+status+".";
+  }
+
+  // --- Zusammenführen (pro Eintrag/Tag gewinnt die jüngste Änderung) ---
+  function entryMod(e){ return +e.mod || +e.ts || 0; }
+  function validRemoteEntry(e){
+    return e && (typeof e.id==="string" || typeof e.id==="number") && String(e.id)!=="" &&
+           typeof e.text==="string" &&
+           typeof e.date==="string" && /^\d{4}-\d{2}-\d{2}$/.test(e.date);
+  }
+  function sameCounts(a,b){
+    for(var i=0;i<MARKERS.length;i++){ var L=MARKERS[i]; if(((a&&a[L])||0)!==((b&&b[L])||0)) return false; }
+    return true;
+  }
+  function maxCounts(a,b){
+    var out={};
+    MARKERS.forEach(function(L){ var n=Math.max((a&&a[L])||0,(b&&b[L])||0); if(n>0) out[L]=n; });
+    return Object.keys(out).length ? out : undefined;
+  }
+  function mergeKeyedMaps(Lmap, Lts, Rmap, Rts, eq, pickTie){
+    var out = { changed:false, push:false, metaChanged:false };
+    Rmap = (Rmap && typeof Rmap==="object") ? Rmap : {};
+    Rts  = (Rts  && typeof Rts ==="object") ? Rts  : {};
+    var keys={};
+    [Lmap,Lts,Rmap,Rts].forEach(function(m){
+      Object.keys(m).forEach(function(k){ if(/^\d{4}-\d{2}-\d{2}$/.test(k)) keys[k]=true; });
+    });
+    Object.keys(keys).forEach(function(k){
+      var lt=+Lts[k]||0, rt=+Rts[k]||0, lv=Lmap[k], rv=Rmap[k];
+      if(rt>lt){
+        if(!eq(lv,rv)){ if(rv===undefined) delete Lmap[k]; else Lmap[k]=rv; out.changed=true; }
+        Lts[k]=rt; out.metaChanged=true;
+      } else if(lt>rt){
+        out.push=true;
+      } else {                       // gleich alt (auch 0/0 aus der Zeit vor dem Sync): großzügig vereinen
+        var mv=pickTie(lv,rv);
+        if(!eq(mv,lv)){ if(mv===undefined) delete Lmap[k]; else Lmap[k]=mv; out.changed=true; }
+        if(!eq(mv,rv)) out.push=true;
+      }
+    });
+    return out;
+  }
+  async function mergeRemotePayload(P){
+    var res = { localChanged:false, pushNeeded:false };
+    var metaChanged = false;
+    P = (P && typeof P==="object") ? P : {};
+    var Rtomb={}; if(P.tomb && typeof P.tomb==="object"){
+      Object.keys(P.tomb).forEach(function(id){ var t=+P.tomb[id]; if(t>0) Rtomb[id]=t; });
+    }
+    var Rents={}; (Array.isArray(P.entries)?P.entries:[]).forEach(function(e){ if(validRemoteEntry(e)) Rents[e.id]=e; });
+    var Ltomb = syncMeta.tomb;
+    var byId={}; entries.forEach(function(e){ byId[e.id]=e; });
+
+    // Remote-Löschungen übernehmen – außer der lokale Eintrag wurde danach bearbeitet
+    for(var id in Rtomb){
+      var rt=Rtomb[id], le=byId[id];
+      if(le && entryMod(le)>rt){ res.pushNeeded=true; continue; }
+      if(le){
+        delete byId[id];
+        entries = entries.filter(function(e){ return e.id!==id; });
+        await dbDelete("entries", id);
+        res.localChanged=true;
+      }
+      if(!(Ltomb[id]>=rt)){ Ltomb[id]=rt; metaChanged=true; }
+    }
+    // Lokale Löschungen: Remote kennt sie noch nicht – oder hat den Eintrag danach bearbeitet
+    for(var id2 in Ltomb){
+      var lt=Ltomb[id2], re=Rents[id2];
+      if(re && entryMod(re)>lt){ delete Ltomb[id2]; metaChanged=true; }   // Bearbeitung schlägt ältere Löschung
+      else if(re || !(Rtomb[id2]>=lt)) res.pushNeeded=true;
+    }
+    // Remote-Einträge übernehmen bzw. abgleichen
+    for(var id3 in Rents){
+      var reE=Rents[id3];
+      if(Ltomb[id3]>=entryMod(reE)) continue;
+      var leE=byId[id3];
+      if(!leE){
+        var rec={ id:String(reE.id), date:reE.date, ts:+reE.ts||entryMod(reE)||Date.now(),
+                  mod:entryMod(reE), text:String(reE.text),
+                  cat:(typeof reE.cat==="string"&&reE.cat) ? reE.cat : FALLBACK.key };
+        entries.push(rec); byId[rec.id]=rec;
+        await putEntry(rec);
+        res.localChanged=true;
+      } else {
+        var lm=entryMod(leE), rm=entryMod(reE);
+        if(rm>lm){
+          leE.date=reE.date; leE.ts=+reE.ts||leE.ts; leE.text=String(reE.text);
+          leE.cat=(typeof reE.cat==="string"&&reE.cat)?reE.cat:leE.cat; leE.mod=rm;
+          await putEntry(leE);
+          res.localChanged=true;
+        } else if(lm>rm) res.pushNeeded=true;
+      }
+    }
+    // Nur lokal vorhandene Einträge -> hochladen
+    for(var i=0;i<entries.length;i++){ if(!Rents[entries[i].id]){ res.pushNeeded=true; break; } }
+
+    var r1 = mergeKeyedMaps(markers, syncMeta.marksTs, normalizeMarkers(P.markers), P.marksTs, sameCounts, maxCounts);
+    if(r1.changed){ await saveMarkersEnc(); res.localChanged=true; }
+    var r2 = mergeKeyedMaps(moods, syncMeta.moodsTs, normalizeMoods(P.moods), P.moodsTs,
+      function(a,b){ return (+a||0)===(+b||0); },
+      function(a,b){ var v=Math.max(+a||0,+b||0); return v>0?v:undefined; });
+    if(r2.changed){ await saveMoodsEnc(); res.localChanged=true; }
+    if(r1.push||r2.push) res.pushNeeded=true;
+    if(r1.metaChanged||r2.metaChanged) metaChanged=true;
+
+    // Kategorien: die zuletzt geänderte Liste gewinnt als Ganzes
+    var rCats = Array.isArray(P.categories) ? P.categories.filter(function(c){
+      return c && typeof c.key==="string" && typeof c.label==="string" &&
+             typeof c.color==="string" && /^#[0-9a-fA-F]{3,8}$/.test(c.color);
+    }) : [];
+    var rMod = +P.catsMod||0;
+    if(rCats.length && rMod>syncMeta.catsMod){
+      S.cats = rCats; syncMeta.catsMod = rMod; metaChanged=true;
+      await saveCatsEnc(); res.localChanged=true;
+      if(S.filter!=="all" && !S.cats.some(function(c){ return c.key===S.filter; })) S.filter="all";
+      if(!S.cats.some(function(c){ return c.key===S.draftCat; })) S.draftCat = S.cats[0] ? S.cats[0].key : "privat";
+    } else if(syncMeta.catsMod>rMod || JSON.stringify(rCats)!==JSON.stringify(S.cats)){
+      res.pushNeeded=true;
+    }
+
+    if(metaChanged) await saveSyncMetaEnc();
+    return res;
+  }
+  function buildSyncPayload(){
+    return { v:1,
+      catsMod:syncMeta.catsMod, categories:S.cats,
+      markers:markers, marksTs:syncMeta.marksTs,
+      moods:moods, moodsTs:syncMeta.moodsTs,
+      tomb:syncMeta.tomb,
+      entries: entries.map(function(e){ return { id:e.id, date:e.date, ts:e.ts, mod:entryMod(e), text:e.text, cat:e.cat }; })
+    };
+  }
+
+  async function syncNow(reason){
+    if(!SY.cfg || !SY.key || !sessionKey) return false;
+    if(SY.busy){ SY.again=true; return false; }
+    SY.busy=true;
+    if(S.view==="sync" && !S.gate) render();
+    var ok=false;
+    try{
+      var cfg=SY.cfg;
+      var got = await ghGetFile(cfg);
+      if(!sessionKey) throw { msg:"Gesperrt." };
+      var remoteSha=null, pushNeeded=false;
+      if(got.status===200){
+        remoteSha=got.sha;
+        var f=got.file;
+        if(!f || f.app!=="tagebuch-sync" || !f.payload) throw { msg:"Unerwartetes Dateiformat im Online-Speicher." };
+        var P;
+        try{ P = await decJSON(SY.key, f.payload); }
+        catch(e){ throw { msg:"Entschlüsselung fehlgeschlagen – Online-Speicher bitte trennen und neu verbinden." }; }
+        // Passwort-Wechsel eines anderen Geräts übernehmen (neue Schlüssel-Verpackung)
+        if(!cfg.rewrapPending && f.kdf && f.wrappedKey){
+          cfg.wrap = { salt:f.kdf.salt, iterations:f.kdf.iterations, wrappedKey:f.wrappedKey };
+        }
+        var m = await mergeRemotePayload(P);
+        if(m.localChanged && !S.gate) render();
+        pushNeeded = m.pushNeeded;
+      } else if(got.status===404){
+        pushNeeded=true;
+      } else throw { msg:syncErrText(got.status) };
+
+      if(pushNeeded || SY.dirty || cfg.rewrapPending){
+        SY.dirty=false;               // Änderungen während des Hochladens setzen das Flag erneut
+        if(!sessionKey) throw { msg:"Gesperrt." };
+        var fileObj = { app:"tagebuch-sync", version:1, updatedAt:new Date().toISOString(),
+          kdf:{ salt:cfg.wrap.salt, iterations:cfg.wrap.iterations },
+          wrappedKey: cfg.wrap.wrappedKey,
+          payload: await encJSON(SY.key, buildSyncPayload()) };
+        var put = await ghPutFile(cfg, fileObj, remoteSha);
+        if(put.status===409 || put.status===422){
+          // Ein anderes Gerät hat inzwischen gespeichert: neu laden, mergen, einmal erneut versuchen
+          var again = await ghGetFile(cfg);
+          if(again.status===200 && again.file && again.file.payload){
+            var P2=null; try{ P2 = await decJSON(SY.key, again.file.payload); }catch(e){}
+            if(P2){ var m2 = await mergeRemotePayload(P2); if(m2.localChanged && !S.gate) render(); }
+            fileObj.payload = await encJSON(SY.key, buildSyncPayload());
+            fileObj.updatedAt = new Date().toISOString();
+            put = await ghPutFile(cfg, fileObj, again.sha);
+          }
+        }
+        if(put.status!==200){
+          throw { msg:(put.status===409||put.status===422) ? "Gleichzeitige Änderung – bitte gleich erneut synchronisieren." : syncErrText(put.status) };
+        }
+        cfg.sha=put.sha; cfg.rewrapPending=false;
+      } else if(remoteSha) cfg.sha=remoteSha;
+
+      await saveSyncCfgEnc();
+      SY.lastOk=Date.now(); SY.lastErr=""; SY.warned=false; ok=true;
+    } catch(err){
+      SY.lastErr = (err && err.msg) ? err.msg : "Offline oder Netzwerkfehler – wird nachgeholt.";
+      if(!(err && err.msg)) console.warn("Sync:", err);
+      if(reason!=="manual" && !SY.warned && sessionKey){
+        SY.warned=true;
+        flash('Sync fehlgeschlagen – Details unter „Online-Speicher"');
+      }
+    } finally {
+      SY.busy=false;
+      if(SY.again){ SY.again=false; setTimeout(function(){ syncNow(reason); }, 0); }
+      else if(S.view==="sync" && !S.gate) render();
+    }
+    return ok;
+  }
+
+  // --- Einrichten / Trennen ---
+  function parseRepoInput(s){
+    s = String(s||"").trim()
+      .replace(/^https?:\/\/(www\.)?github\.com\//i,"")
+      .replace(/\.git$/i,"").replace(/\/+$/,"");
+    var m = s.split("/");
+    if(m.length!==2 || !m[0] || !m[1]) return null;
+    return { owner:m[0], repo:m[1] };
+  }
+  async function setupSync(repoStr, token, password){
+    var pr = parseRepoInput(repoStr);
+    if(!pr) return 'Repository bitte als „benutzername/repo" angeben.';
+    token = String(token||"").trim();
+    if(!token) return "Bitte einen GitHub-Token eingeben.";
+    if(!password) return "Bitte dein Tagebuch-Passwort eingeben.";
+    var cfg = { owner:pr.owner, repo:pr.repo, token:token, keyB64:null, wrap:null, sha:null, rewrapPending:false };
+    var repo;
+    try{ repo = await ghGetRepo(cfg); }
+    catch(e){ return "Keine Verbindung zu GitHub – bist du online?"; }
+    if(repo.status===401) return "Token ungültig.";
+    if(repo.status===404) return "Repository nicht gefunden – Name und Token-Zugriff prüfen.";
+    if(repo.status!==200) return syncErrText(repo.status);
+    if(repo.json && repo.json.private===false) return "Bitte ein privates Repository verwenden – dein Tagebuch gehört nicht in ein öffentliches.";
+    var got;
+    try{ got = await ghGetFile(cfg); }
+    catch(e){ return "Keine Verbindung zu GitHub – bist du online?"; }
+    if(got.status===200){
+      var f=got.file;
+      if(!f || f.app!=="tagebuch-sync" || !f.kdf || !f.wrappedKey || !f.payload){
+        return 'Im Repository liegt bereits eine „'+SYNC_FILE+'" in unerwartetem Format.';
+      }
+      try{
+        var kk = await deriveKey(password, fromB64(f.kdf.salt), f.kdf.iterations||PBKDF2_ITER);
+        cfg.keyB64 = await decJSON(kk, f.wrappedKey);
+        if(typeof cfg.keyB64!=="string" || !cfg.keyB64) throw 0;
+      }catch(e){
+        return "Passwort passt nicht zum Online-Speicher. Falls das andere Gerät ein anderes Tagebuch-Passwort nutzt, gib jenes ein.";
+      }
+      cfg.wrap = { salt:f.kdf.salt, iterations:f.kdf.iterations||PBKDF2_ITER, wrappedKey:f.wrappedKey };
+    } else if(got.status===404){
+      // Neu anlegen: Zur Sicherheit muss es das Passwort dieses Tagebuchs sein
+      var a = await dbGet("prefs","auth");
+      try{
+        var lk = await deriveKey(password, fromB64(a.salt), a.iterations||PBKDF2_ITER);
+        if((await decJSON(lk, a.verifier))!==VERIFY_TOKEN) throw 0;
+      }catch(e){ return "Das ist nicht dein Tagebuch-Passwort."; }
+      cfg.keyB64 = b64(rndBytes(32));
+      var salt = rndBytes(16);
+      var wk = await deriveKey(password, salt, PBKDF2_ITER);
+      cfg.wrap = { salt:b64(salt), iterations:PBKDF2_ITER, wrappedKey: await encJSON(wk, cfg.keyB64) };
+    } else return syncErrText(got.status);
+    SY.cfg = cfg;
+    SY.key = await subtle.importKey("raw", fromB64(cfg.keyB64), "AES-GCM", false, ["encrypt","decrypt"]);
+    if(!syncMeta.catsMod){ syncMeta.catsMod = Date.now(); await saveSyncMetaEnc(); }
+    SY.dirty = true;
+    await saveSyncCfgEnc();
+    var ok = await syncNow("manual");
+    return ok ? null : (SY.lastErr || "Synchronisierung fehlgeschlagen.");
+  }
+  async function detachSync(){
+    if(SY.timer){ clearTimeout(SY.timer); SY.timer=null; }
+    SY.cfg=null; SY.key=null; SY.lastOk=0; SY.lastErr=""; SY.dirty=false; SY.warned=false;
+    await saveSyncCfgEnc();
   }
 
   // ---------- Auth ----------
@@ -332,6 +695,7 @@
     entries = await loadAllEntries();
     markers = {};
     moods = {};
+    syncMeta = freshSyncMeta();
   }
   async function unlock(password){
     var a = await dbGet("prefs","auth");
@@ -351,6 +715,7 @@
     moods = {};
     var md = await dbGet("prefs","moods");
     if(md && md.enc){ try{ moods = normalizeMoods(await decJSON(sessionKey, md.enc)); }catch(e){ moods = {}; } }
+    await loadSyncState();
     return true;
   }
   async function changePassword(oldPw, newPw){
@@ -366,13 +731,28 @@
     await saveCatsEnc();
     await saveMarkersEnc();
     await saveMoodsEnc();
+    await saveSyncMetaEnc();
+    if(SY.cfg){
+      // Sync-Schlüssel mit dem neuen Passwort neu verpacken; nächster Sync lädt es hoch
+      var sSalt = rndBytes(16);
+      var wKey = await deriveKey(newPw, sSalt, PBKDF2_ITER);
+      SY.cfg.wrap = { salt:b64(sSalt), iterations:PBKDF2_ITER, wrappedKey: await encJSON(wKey, SY.cfg.keyB64) };
+      SY.cfg.rewrapPending = true;
+      markDirty();
+    }
+    await saveSyncCfgEnc();
     await dbPut("prefs", { key:"auth", salt:b64(salt), iterations:PBKDF2_ITER, verifier: await encJSON(newKey, VERIFY_TOKEN) });
     return true;
   }
   function lock(){
     sessionKey = null; entries = []; markers = {}; moods = {}; S.cats = DEFAULT_CATS.slice();
+    if(SY.timer){ clearTimeout(SY.timer); SY.timer=null; }
+    SY.cfg=null; SY.key=null; SY.again=false; SY.dirty=false;
+    SY.lastOk=0; SY.lastErr=""; SY.warned=false;
+    syncMeta = freshSyncMeta();
     S.view="calendar"; S.calMode="month"; S.menuOpen=false; S.selected=null;
     S.draftText=""; S.editingId=null; S.searchQ=""; S.searchRes=[];
+    S.syncTokenEdit=false; S.syncDetachAsk=false;
     S.gate="login"; S.gateErr=""; render();
   }
 
@@ -402,6 +782,8 @@
     menuOpen: false,
     rec: false,
     micHint: "",
+    syncTokenEdit: false,
+    syncDetachAsk: false,
     otdOpen: true,              // „An diesem Tag"-Karte auf-/zugeklappt
     statsMode: "month",         // month | year
     heatMetric: "entries"       // entries | mood (Jahres-Heatmap)
@@ -433,6 +815,7 @@
     if(n<=0) delete m[L]; else m[L]=n;
     if(Object.keys(m).length) markers[dk]=m; else delete markers[dk];
     saveMarkersEnc();
+    syncMeta.marksTs[dk]=Date.now(); saveSyncMetaEnc(); markDirty();
   }
   function normalizeMarkers(obj){    // akzeptiert altes Array-Format und neues Zähl-Objekt
     var out={};
@@ -457,6 +840,7 @@
   function setMood(dk, v){
     if(moods[dk]===v) delete moods[dk]; else moods[dk]=v;
     saveMoodsEnc();
+    syncMeta.moodsTs[dk]=Date.now(); saveSyncMetaEnc(); markDirty();
   }
 
   // ---------- Icons ----------
@@ -479,7 +863,9 @@
     BarChart:'<line x1="12" x2="12" y1="20" y2="10"/><line x1="18" x2="18" y1="20" y2="4"/><line x1="6" x2="6" y1="20" y2="14"/>',
     Lock:'<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
     LockBig:'<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><circle cx="12" cy="16" r="1"/>',
-    KeyRound:'<path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/>'
+    KeyRound:'<path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/>',
+    Cloud:'<path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/>',
+    RefreshCw:'<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>'
   };
   function icon(name, size){
     size = size || 20;
@@ -532,6 +918,8 @@
         '<span class="brand">Tagebuch</span>'+
       '</div>'+
       '<div class="row gap1">'+
+        (SY.cfg ? '<button class="iconbtn" data-act="open-sync" aria-label="Online-Speicher" style="color:'+
+                  (SY.lastErr ? '#C0504D' : 'var(--inkSoft)')+'">'+icon("Cloud",19)+'</button>' : '')+
         '<button class="iconbtn" data-act="open-search" aria-label="Suchen">'+icon("Search",20)+'</button>'+
         '<button class="iconbtn" data-act="open-menu" aria-label="Menü">'+icon("MoreVertical",20)+'</button>'+
       '</div>'+
@@ -899,8 +1287,8 @@
               '<span class="muted" style="font-size:12px">'+fmtTime(e.ts)+'</span>'+
             '</div>'+
             '<div class="row gap1">'+
-              '<button class="iconbtn sm" style="color:var(--inkSoft)" data-edit="'+e.id+'" aria-label="Bearbeiten">'+icon("Pencil",15)+'</button>'+
-              '<button class="iconbtn sm" style="color:var(--inkSoft)" data-del="'+e.id+'" aria-label="Löschen">'+icon("Trash2",15)+'</button>'+
+              '<button class="iconbtn sm" style="color:var(--inkSoft)" data-edit="'+esc(e.id)+'" aria-label="Bearbeiten">'+icon("Pencil",15)+'</button>'+
+              '<button class="iconbtn sm" style="color:var(--inkSoft)" data-del="'+esc(e.id)+'" aria-label="Löschen">'+icon("Trash2",15)+'</button>'+
             '</div>'+
           '</div>'+
           '<p class="entry-text">'+esc(e.text)+'</p>'+
@@ -982,7 +1370,7 @@
     }
     return S.searchRes.map(function(e){
       var c = findCat(e.cat);
-      return '<button class="res-btn" data-goto="'+e.id+'">'+
+      return '<button class="res-btn" data-goto="'+esc(e.id)+'">'+
         '<div class="res-meta"><span class="dot" style="background:'+c.color+'"></span>'+
           '<span>'+esc(fmtLongDate(e.date))+' · '+fmtTime(e.ts)+'</span></div>'+
         '<p class="res-text">'+esc(e.text)+'</p></button>';
@@ -1028,6 +1416,71 @@
     '</main>';
   }
 
+  // ---------- Online-Speicher-Ansicht ----------
+  function fmtAgo(ts){
+    if(!ts) return "noch nie";
+    var s = Math.round((Date.now()-ts)/1000);
+    if(s<10) return "gerade eben";
+    if(s<60) return "vor "+s+" Sekunden";
+    var m = Math.round(s/60);
+    if(m<60) return "vor "+m+" Min.";
+    return "am "+new Intl.DateTimeFormat("de-DE",{ dateStyle:"short", timeStyle:"short" }).format(new Date(ts));
+  }
+  function syncHTML(){
+    var inner;
+    if(!SY.cfg){
+      inner =
+        '<p class="note" style="margin-top:0">Verbinde dein Tagebuch mit einem <b>privaten GitHub-Repository</b>, um es auf mehreren Geräten zu nutzen. Hochgeladen wird ausschließlich <b>verschlüsselter</b> Inhalt – ohne dein Passwort bleibt er unlesbar, auch für GitHub.</p>'+
+        '<div class="cat-card"><p class="note" style="margin:0"><b>Einmalig vorbereiten (auf github.com):</b><br>'+
+          '1. Neues <b>privates</b> Repository anlegen, z.&nbsp;B. „tagebuch-daten".<br>'+
+          '2. Token erstellen: <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">github.com/settings/personal-access-tokens/new</a> (in den <i>Profil</i>-Einstellungen: Avatar oben rechts → Settings → ganz unten <i>Developer settings</i>) – nur dieses Repository auswählen, Berechtigung <i>Contents: Read and write</i>.<br>'+
+          '3. Beides hier eintragen – auf jedem Gerät gleich.</p></div>'+
+        '<div class="gate" style="flex:none; padding:12px 0; gap:10px">'+
+          '<div class="field"><label for="syncRepo">Repository (benutzername/repo)</label>'+
+            '<input id="syncRepo" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="z. B. stiggyb/tagebuch-daten" /></div>'+
+          '<div class="field"><label for="syncToken">GitHub-Token</label>'+
+            '<input id="syncToken" type="password" autocomplete="off" placeholder="github_pat_…" /></div>'+
+          '<div class="field"><label for="syncPw">Dein Tagebuch-Passwort</label>'+
+            '<input id="syncPw" type="password" autocomplete="current-password" /></div>'+
+          '<p class="err" id="syncErr"></p>'+
+          '<button class="primary" id="syncSetupBtn">Verbinden & synchronisieren</button>'+
+        '</div>'+
+        '<p class="note">Gibt es im Repository schon einen Tagebuch-Speicher (von deinem anderen Gerät), wird er übernommen und mit diesem Gerät zusammengeführt.</p>';
+    } else {
+      var status = SY.busy ? "Synchronisiert gerade …" : "Zuletzt synchronisiert: "+fmtAgo(SY.lastOk);
+      var err = SY.lastErr ? '<p class="err" style="text-align:left; min-height:0; margin:6px 0 0">'+esc(SY.lastErr)+'</p>' : '';
+      inner =
+        '<div class="cat-card">'+
+          '<div class="row gap2" style="margin-bottom:4px; color:var(--ink)">'+icon("Cloud",18)+
+            '<b style="font-size:15px; overflow:hidden; text-overflow:ellipsis">'+esc(SY.cfg.owner+"/"+SY.cfg.repo)+'</b></div>'+
+          '<p class="note" style="margin:0">'+esc(status)+'</p>'+err+
+        '</div>'+
+        '<div class="gate" style="flex:none; padding:12px 0; gap:10px">'+
+          '<button class="primary" id="syncNowBtn"'+(SY.busy?" disabled":"")+'>'+(SY.busy?"Synchronisiert …":"Jetzt synchronisieren")+'</button>'+
+          (S.syncTokenEdit
+            ? '<div class="field"><label for="syncNewToken">Neuer GitHub-Token</label>'+
+                '<input id="syncNewToken" type="password" autocomplete="off" placeholder="github_pat_…" /></div>'+
+              '<p class="err" id="syncErr"></p>'+
+              '<button class="primary" id="syncTokenSave" style="background:var(--inkSoft)">Token speichern</button>'
+            : '<button class="ghost" data-act="sync-token-edit">Token erneuern</button>')+
+          (S.syncDetachAsk
+            ? '<div class="row gap2" style="justify-content:center">'+
+                '<button class="mini-btn" data-act="sync-detach-yes" style="background:#C0504D; color:#fff; padding:10px 16px">Wirklich trennen</button>'+
+                '<button class="mini-btn" data-act="sync-detach-no" style="color:var(--inkSoft); padding:10px 16px">Abbrechen</button></div>'
+            : '<button class="ghost" data-act="sync-detach-ask" style="color:#C0504D">Verbindung trennen</button>')+
+        '</div>'+
+        '<p class="note">Synchronisiert wird automatisch beim Entsperren und nach Änderungen. Gelöschte Einträge verschwinden auf allen Geräten; ändern zwei Geräte dasselbe, gewinnt die jüngste Version. Im Repository liegt nur die verschlüsselte Datei „'+SYNC_FILE+'" – beim Trennen bleibt sie dort erhalten, dieses Gerät synchronisiert nur nicht mehr.</p>';
+    }
+    return headerHTML()+
+    '<main>'+
+      '<div class="sub-head">'+
+        '<button class="iconbtn sm" data-act="to-calendar" aria-label="Zurück" style="margin-left:-6px">'+icon("ArrowLeft",22)+'</button>'+
+        '<h2 class="sub-title">Online-Speicher</h2>'+
+      '</div>'+
+      '<div class="scroll">'+inner+'</div>'+
+    '</main>';
+  }
+
   // ---------- Menü ----------
   function menuHTML(){
     if(!S.menuOpen) return "";
@@ -1042,10 +1495,14 @@
         '<div class="menu-sep"></div>'+
         '<button class="menu-item" data-act="import"><span style="color:var(--inkSoft)">'+icon("Upload",19)+'</span><span>Aus Datei importieren</span></button>'+
         '<div class="menu-sep"></div>'+
+        '<button class="menu-item" data-act="open-sync"><span style="color:var(--inkSoft)">'+icon("Cloud",19)+'</span><span>Online-Speicher'+(SY.cfg?'':' einrichten')+'</span></button>'+
+        '<div class="menu-sep"></div>'+
         '<button class="menu-item" data-act="change-pw"><span style="color:var(--inkSoft)">'+icon("KeyRound",19)+'</span><span>Passwort ändern</span></button>'+
         '<div class="menu-sep"></div>'+
         '<button class="menu-item" data-act="lock"><span style="color:var(--inkSoft)">'+icon("Lock",19)+'</span><span>Sperren</span></button>'+
-        '<p class="note" style="margin-top:12px">Deine Einträge sind mit deinem Passwort verschlüsselt und liegen nur auf diesem Gerät. Sichere sie regelmäßig als Datei – dein Backup und dein Umzugsweg.</p>'+
+        '<p class="note" style="margin-top:12px">'+(SY.cfg
+          ? 'Deine Einträge sind mit deinem Passwort verschlüsselt und werden – ebenfalls nur verschlüsselt – in deinem Online-Speicher synchronisiert. Die JSON-Sicherung bleibt trotzdem ein gutes Backup.'
+          : 'Deine Einträge sind mit deinem Passwort verschlüsselt und liegen nur auf diesem Gerät. Sichere sie regelmäßig als Datei – oder richte den Online-Speicher ein, um mehrere Geräte synchron zu halten.')+'</p>'+
       '</div>'+
     '</div>';
   }
@@ -1104,6 +1561,7 @@
     else if(S.view==="search") html = searchViewHTML();
     else if(S.view==="cats") html = catsHTML();
     else if(S.view==="stats") html = statsHTML();
+    else if(S.view==="sync") html = syncHTML();
     appEl.innerHTML = '<div class="shell">'+html+menuHTML()+'</div>';
 
     if(S.view==="day"){
@@ -1171,11 +1629,12 @@
     if(!text || !S.selected) return;
     if(S.editingId){
       var e = entries.find(function(x){ return x.id===S.editingId; });
-      if(e){ e.text=text; e.cat=S.draftCat; await putEntry(e); }
+      if(e){ e.text=text; e.cat=S.draftCat; e.mod=Date.now(); await putEntry(e); }
     } else {
-      var rec = { id:uid(), date:S.selected, ts:Date.now(), text:text, cat:S.draftCat };
+      var rec = { id:uid(), date:S.selected, ts:Date.now(), mod:Date.now(), text:text, cat:S.draftCat };
       entries.push(rec); await putEntry(rec);
     }
+    markDirty();
     S.draftText=""; S.editingId=null; render();
   }
   function startEdit(id){
@@ -1187,6 +1646,7 @@
   async function deleteEntry(id){
     entries = entries.filter(function(e){ return e.id!==id; });
     await dbDelete("entries", id);
+    syncMeta.tomb[id]=Date.now(); await saveSyncMetaEnc(); markDirty();
     if(S.editingId===id){ S.editingId=null; S.draftText=""; }
     render(); flash("Eintrag gelöscht");
   }
@@ -1238,24 +1698,27 @@
       if(!Array.isArray(list)) throw new Error("Format");
       if(data.categories && data.categories.length){ S.cats = data.categories; await saveCats(S.cats); }
       var existing = {}; entries.forEach(function(e){ existing[e.id]=true; });
-      var added = 0;
+      var added = 0, metaTouched = false;
       for(var i=0;i<list.length;i++){
         var e = list[i];
         if(!e || !e.date || !e.text) continue;
-        var rec = { id:e.id || uid(), date:e.date, ts:e.ts || Date.now(), text:e.text, cat:e.cat || (S.cats[0] && S.cats[0].key) || "privat" };
+        var rec = { id:e.id ? String(e.id) : uid(), date:e.date, ts:e.ts || Date.now(), mod:Date.now(), text:e.text, cat:e.cat || (S.cats[0] && S.cats[0].key) || "privat" };
         if(existing[rec.id]) continue;
+        if(syncMeta.tomb[rec.id]!==undefined){ delete syncMeta.tomb[rec.id]; metaTouched=true; }
         existing[rec.id]=true; entries.push(rec); await putEntry(rec); added++;
       }
       if(data.markers && typeof data.markers==="object" && !Array.isArray(data.markers)){
         var norm = normalizeMarkers(data.markers);
-        Object.keys(norm).forEach(function(k){ markers[k]=norm[k]; });
+        Object.keys(norm).forEach(function(k){ markers[k]=norm[k]; syncMeta.marksTs[k]=Date.now(); metaTouched=true; });
         await saveMarkersEnc();
       }
       if(data.moods && typeof data.moods==="object" && !Array.isArray(data.moods)){
         var nm = normalizeMoods(data.moods);
-        Object.keys(nm).forEach(function(k){ moods[k]=nm[k]; });
+        Object.keys(nm).forEach(function(k){ moods[k]=nm[k]; syncMeta.moodsTs[k]=Date.now(); metaTouched=true; });
         await saveMoodsEnc();
       }
+      if(metaTouched) await saveSyncMetaEnc();
+      if(added || metaTouched) markDirty();
       S.menuOpen=false; render(); flash(added+" Einträge importiert");
     } catch(err){ flash("Import fehlgeschlagen – ungültige Datei"); }
   }
@@ -1263,6 +1726,7 @@
   async function saveCats(next){
     S.cats = next;
     await saveCatsEnc();
+    syncMeta.catsMod=Date.now(); await saveSyncMetaEnc(); markDirty();
     if(S.filter!=="all" && !S.cats.some(function(c){ return c.key===S.filter; })) S.filter="all";
     if(!S.cats.some(function(c){ return c.key===S.draftCat; })) S.draftCat = S.cats[0] ? S.cats[0].key : "privat";
   }
@@ -1274,7 +1738,7 @@
   }
   function renameCat(key, label){
     var c = S.cats.find(function(x){ return x.key===key; });
-    if(c){ c.label = label; saveCatsEnc(); }
+    if(c){ c.label = label; saveCatsEnc(); syncMeta.catsMod=Date.now(); saveSyncMetaEnc(); markDirty(); }
   }
   function recolorCat(key, color){
     var next = S.cats.map(function(c){ return c.key===key ? Object.assign({}, c, { color:color }) : c; });
@@ -1349,7 +1813,7 @@
     S.gateBusy=true; S.gateErr=""; render();
     var ok=false; try{ ok=await unlock(a); }catch(e){ ok=false; }
     S.gateBusy=false;
-    if(ok){ S.gate=null; S.view="calendar"; hiddenAt=0; render(); }
+    if(ok){ S.gate=null; S.view="calendar"; hiddenAt=0; render(); if(SY.cfg) syncNow("unlock"); }
     else { S.gateErr="Falsches Passwort."; render(); }
   }
   async function doChange(){
@@ -1419,6 +1883,13 @@
       case "add-cat": addCat(); break;
       case "export": exportJSON(); break;
       case "import": fileInput.click(); break;
+      case "open-sync": S.view="sync"; S.menuOpen=false; S.syncTokenEdit=false; S.syncDetachAsk=false; render(); break;
+      case "sync-token-edit": S.syncTokenEdit=true; render(); break;
+      case "sync-detach-ask": S.syncDetachAsk=true; render(); break;
+      case "sync-detach-no": S.syncDetachAsk=false; render(); break;
+      case "sync-detach-yes":
+        detachSync().then(function(){ S.syncDetachAsk=false; render(); flash("Online-Speicher getrennt"); });
+        break;
       case "change-pw": S.gate="change"; S.gateErr=""; S.menuOpen=false; render(); break;
       case "lock": lock(); break;
       case "gate-cancel": S.gate=null; S.gateErr=""; render(); break;
@@ -1430,12 +1901,52 @@
     if(ev.target.closest("#sheet") && !ev.target.closest("[data-act]")) ev.stopPropagation();
   }, true);
 
-  // Mic/Send/Clear (eigene IDs)
+  // Mic/Send/Clear/Sync (eigene IDs)
   appEl.addEventListener("click", function(ev){
     if(ev.target.closest("#micBtn")){ toggleRec(); }
     else if(ev.target.closest("#sendBtn")){ submitEntry(); }
     else if(ev.target.closest("#searchClear")){ var i=document.getElementById("searchInput"); if(i){ i.value=""; runSearch(""); i.focus(); } }
+    else if(ev.target.closest("#syncSetupBtn")){ doSyncSetup(); }
+    else if(ev.target.closest("#syncTokenSave")){ doSyncTokenSave(); }
+    else if(ev.target.closest("#syncNowBtn")){
+      if(!SY.busy){ syncNow("manual").then(function(ok){ flash(ok ? "Synchronisiert" : "Sync fehlgeschlagen"); }); }
+    }
   });
+
+  // Online-Speicher: Einrichtung & Token-Wechsel (gezielte DOM-Updates statt Re-Render,
+  // damit die Eingaben beim Anzeigen von Fehlern erhalten bleiben)
+  var syncSetupBusy = false;
+  async function doSyncSetup(){
+    if(syncSetupBusy || SY.cfg) return;
+    var rEl=document.getElementById("syncRepo"), tEl=document.getElementById("syncToken"), pEl=document.getElementById("syncPw");
+    var errEl=document.getElementById("syncErr"), btn=document.getElementById("syncSetupBtn");
+    syncSetupBusy=true;
+    if(errEl) errEl.textContent="";
+    if(btn){ btn.disabled=true; btn.textContent="Verbinde …"; }
+    var err;
+    try{ err = await setupSync(rEl&&rEl.value, tEl&&tEl.value, pEl&&pEl.value); }
+    catch(e){ console.error(e); err="Unerwarteter Fehler bei der Einrichtung."; }
+    syncSetupBusy=false;
+    if(err){
+      if(SY.cfg){                          // halb eingerichtet? Sauber zurückrollen
+        await detachSync();
+        if(S.view==="sync" && !S.gate) render();   // zurück zum Formular
+      }
+      var e2=document.getElementById("syncErr"); if(e2) e2.textContent=err;
+      var b2=document.getElementById("syncSetupBtn"); if(b2){ b2.disabled=false; b2.textContent="Verbinden & synchronisieren"; }
+    } else if(!S.gate){
+      render(); flash("Online-Speicher verbunden");
+    }
+  }
+  async function doSyncTokenSave(){
+    if(!SY.cfg) return;
+    var el=document.getElementById("syncNewToken");
+    var v=el && el.value.trim();
+    if(!v){ var e1=document.getElementById("syncErr"); if(e1) e1.textContent="Bitte den neuen Token eingeben."; return; }
+    SY.cfg.token=v; await saveSyncCfgEnc();
+    S.syncTokenEdit=false; SY.lastErr=""; render();
+    syncNow("manual").then(function(ok){ flash(ok ? "Token aktualisiert" : "Token gespeichert – Sync fehlgeschlagen"); });
+  }
 
   // Eingaben ohne Re-Render
   appEl.addEventListener("input", function(ev){
@@ -1517,10 +2028,20 @@
         navigator.serviceWorker.register("./service-worker.js").catch(function(e){ console.warn("SW:", e); });
       });
     }
-    // Auto-Sperre nach Inaktivität im Hintergrund
+    // Auto-Sperre nach Inaktivität im Hintergrund; Sync beim Wegschalten/Zurückkommen
     document.addEventListener("visibilitychange", function(){
-      if(document.hidden){ hiddenAt = Date.now(); }
+      if(document.hidden){
+        hiddenAt = Date.now();
+        if(!S.gate && sessionKey && SY.cfg && SY.dirty){
+          if(SY.timer){ clearTimeout(SY.timer); SY.timer=null; }
+          syncNow("hide");
+        }
+      }
       else if(!S.gate && sessionKey && hiddenAt && (Date.now()-hiddenAt > AUTO_LOCK_MS)){ lock(); }
+      else if(!S.gate && sessionKey && SY.cfg && (SY.dirty || Date.now()-SY.lastOk > SYNC_REFRESH_MS)){ syncNow("focus"); }
+    });
+    window.addEventListener("online", function(){
+      if(!S.gate && sessionKey && SY.cfg) syncNow("online");
     });
   }
   boot();

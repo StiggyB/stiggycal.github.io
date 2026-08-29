@@ -2,6 +2,8 @@
 
 Eine eigenständige, selbst-gehostete **Progressive Web App (PWA)** als persönliches Tagebuch.
 Daten bleiben **lokal auf dem Gerät** (IndexedDB) – kein Backend, keine Accounts, kein Tracking.
+Optional synchronisiert ein **verschlüsselter Online-Speicher** (privates GitHub-Repository)
+mehrere Geräte – hochgeladen wird dabei ausschließlich Ciphertext (siehe unten).
 
 Portiert aus dem ursprünglichen Claude-Artifact (`tagebuch.jsx`), aber komplett unabhängig:
 `window.storage` → **IndexedDB**, plus Manifest, Service-Worker und Icons für die Installation.
@@ -27,6 +29,9 @@ Portiert aus dem ursprünglichen Claude-Artifact (`tagebuch.jsx`), aber komplett
   pro Tag **mehrfach zählbar** (in der Tagesansicht +/−); im Kalenderfeld klein
   und entsprechend oft wiederholt angezeigt (z. B. „W W S")
 - Volltext-Suche über alle Einträge
+- **Online-Speicher (optional)** – Ende-zu-Ende-verschlüsselte Synchronisation
+  über ein privates GitHub-Repository; automatischer Abgleich zwischen Geräten
+  inklusive Zusammenführung (Details unten)
 - **JSON-Export/-Import** – Export enthält Kategorien, Markierungen, Stimmungen
   und Einträge; ältere Exporte (auch das ursprüngliche Claude-Artifact-Format
   `{ categories, entries }`) lassen sich weiterhin importieren
@@ -79,7 +84,8 @@ Das bedeutet konkret:
   werden nur ein zufälliger Salt und ein Prüf-Token (verschlüsselt).
 - **Die Daten liegen nur verschlüsselt vor.** Wer die Datenbank oder das Gerät ausliest,
   sieht ohne Passwort nur Zufallsbytes.
-- **Kein Server, kein Endpunkt „von außen".** Alles bleibt auf dem Gerät.
+- **Kein eigener Server.** Alles bleibt auf dem Gerät – außer du richtest den optionalen
+  Online-Speicher ein; auch dann verlässt nur Verschlüsseltes das Gerät.
 - **Jeder Neustart/Reload verlangt das Passwort** (der Schlüssel lebt nur im Speicher).
   Zusätzlich: manuelles „Sperren" im Menü und **Auto-Sperre nach 5 Minuten** im Hintergrund.
 - **Passwort ändern** verschlüsselt alle Einträge mit dem neuen Schlüssel neu.
@@ -91,6 +97,57 @@ Warum ist der öffentliche Quelltext kein Problem? Die Sicherheit steckt **nicht
 Geheimhalten des Codes, sondern im passwortabgeleiteten Schlüssel (Prinzip von Kerckhoffs).
 Voraussetzung ist eine sichere Herkunft der App – deshalb **HTTPS** (GitHub Pages liefert das).
 
+## Online-Speicher / Sync zwischen Geräten (optional)
+
+Ohne Einrichtung bleibt alles wie gehabt rein lokal. Mit dem Online-Speicher hält die App
+mehrere Geräte (z. B. Handy und Desktop) automatisch synchron – über ein **privates
+GitHub-Repository**, das dir gehört. Es braucht keinen weiteren Dienst und kein Backend.
+
+### Einrichtung (einmalig, ~2 Minuten)
+
+1. Auf github.com ein **neues privates Repository** anlegen (z. B. `tagebuch-daten`).
+2. Einen **Fine-grained Personal Access Token** erstellen – am schnellsten direkt über
+   <https://github.com/settings/personal-access-tokens/new>. (Zu Fuß: **Avatar oben
+   rechts → Settings** – die *Profil*-Einstellungen, nicht die des Repositories – dann
+   in der linken Leiste **ganz unten** *Developer settings → Personal access tokens →
+   Fine-grained tokens*.) Als Zugriff **nur dieses Repository** auswählen und als
+   einzige Berechtigung **Contents: Read and write** setzen. Den Token (`github_pat_…`)
+   sofort kopieren – er wird nur einmal angezeigt.
+3. In der App: **Menü → „Online-Speicher einrichten"** – Repository
+   (`benutzername/tagebuch-daten`), Token und dein Tagebuch-Passwort eintragen.
+4. Auf jedem weiteren Gerät dieselben Angaben eintragen – vorhandene lokale Einträge
+   werden dabei mit dem Online-Stand **zusammengeführt**, nichts wird überschrieben.
+
+### Wie synchronisiert wird
+
+- Automatisch **beim Entsperren**, **kurz nach jeder Änderung** und beim Wechsel
+  zurück in die App; manuell über „Jetzt synchronisieren". Offline geschriebene
+  Einträge werden nachgereicht, sobald wieder Netz da ist.
+- Konflikte löst die App selbst: Einträge werden **pro Eintrag** zusammengeführt
+  (bei gleichzeitiger Bearbeitung gewinnt die jüngste Version), Löschungen gelten
+  auf allen Geräten, Stimmung und Markierungen werden **pro Tag** abgeglichen.
+- Ein Cloud-Symbol im Kopfbereich zeigt an, dass der Sync aktiv ist (rot = Fehler,
+  Details unter „Online-Speicher").
+
+### Sicherheit des Online-Speichers
+
+- Im Repository liegt **eine einzige Datei (`tagebuch-sync.json`) mit Ciphertext** –
+  verschlüsselt mit einem zufälligen 256-Bit-Sync-Schlüssel (AES-GCM). GitHub sieht
+  **keine Klartexte**, auch keine Kategorienamen.
+- Der Sync-Schlüssel selbst liegt nur „verpackt" in der Datei: verschlüsselt mit einem
+  aus deinem **Tagebuch-Passwort** abgeleiteten Schlüssel (PBKDF2-SHA-256). Deshalb kann
+  jedes Gerät mit dem Passwort beitreten – und ohne Passwort niemand.
+- Der GitHub-Token wird nur lokal gespeichert (verschlüsselt wie deine Einträge) und
+  **niemals hochgeladen**. Läuft er ab, erneuerst du ihn unter „Online-Speicher".
+- Die App besteht auf einem **privaten** Repository. Praktischer Nebeneffekt:
+  Jeder Sync ist ein Git-Commit – du hast automatisch eine Versionshistorie.
+- „Verbindung trennen" stoppt nur den Abgleich dieses Geräts; die Datei im Repository
+  bleibt (und kann dort jederzeit gelöscht werden).
+
+> Passwort geändert? Die App verpackt den Sync-Schlüssel automatisch neu und lädt das
+> beim nächsten Sync hoch. Andere Geräte synchronisieren einfach weiter; nur ein **neues**
+> Gerät braucht beim Beitritt das aktuelle Passwort.
+
 ## Datensicherheit / Backup
 
 Der Gerätespeicher kann vom Browser geleert werden (Speicherdruck, „Website-Daten löschen").
@@ -98,5 +155,7 @@ Die App fragt daher `navigator.storage.persist()` an – **sichere deine Einträ
 regelmäßig über Menü → „Als Datei sichern (JSON)"**. Der Export ist unverschlüsselt (damit
 importierbar/portabel) – behandle die Datei entsprechend vertraulich.
 
-Lokal heißt: **pro Gerät.** Kein automatischer Sync zwischen Handy und Desktop – der Weg
-dorthin führt über Export/Import.
+Ohne Online-Speicher heißt lokal: **pro Gerät** – der Weg zwischen Geräten führt dann über
+Export/Import. Mit eingerichtetem Online-Speicher gleichen sich die Geräte automatisch ab;
+der JSON-Export bleibt trotzdem dein Backup für den Fall der Fälle (z. B. Passwort vergessen
+schützt auch der Sync nicht – die Online-Kopie ist genauso verschlüsselt).
