@@ -106,10 +106,13 @@ GitHub-Repository**, das dir gehört. Es braucht keinen weiteren Dienst und kein
 ### Einrichtung (einmalig, ~2 Minuten)
 
 1. Auf github.com ein **neues privates Repository** anlegen (z. B. `tagebuch-daten`).
-2. Einen **Fine-grained Personal Access Token** erstellen:
-   *Settings → Developer settings → Personal access tokens → Fine-grained tokens* –
-   als Zugriff **nur dieses Repository** auswählen und als einzige Berechtigung
-   **Contents: Read and write** setzen.
+2. Einen **Fine-grained Personal Access Token** erstellen – am schnellsten direkt über
+   <https://github.com/settings/personal-access-tokens/new>. (Zu Fuß: **Avatar oben
+   rechts → Settings** – die *Profil*-Einstellungen, nicht die des Repositories – dann
+   in der linken Leiste **ganz unten** *Developer settings → Personal access tokens →
+   Fine-grained tokens*.) Als Zugriff **nur dieses Repository** auswählen und als
+   einzige Berechtigung **Contents: Read and write** setzen. Den Token (`github_pat_…`)
+   sofort kopieren – er wird nur einmal angezeigt.
 3. In der App: **Menü → „Online-Speicher einrichten"** – Repository
    (`benutzername/tagebuch-daten`), Token und dein Tagebuch-Passwort eintragen.
 4. Auf jedem weiteren Gerät dieselben Angaben eintragen – vorhandene lokale Einträge
