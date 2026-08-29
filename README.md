@@ -13,7 +13,9 @@ Portiert aus dem ursprünglichen Claude-Artifact (`tagebuch.jsx`), aber komplett
 - **Passwortschutz mit Ende-zu-Ende-Verschlüsselung** (siehe unten)
 - Monatskalender mit Kategorie-Punkten pro Tag
 - **Wochenansicht** (Agenda) – umschaltbar Monat/Woche
-- **Monats-Statistik** – Kacheln, Balken pro Tag, Stimmungsverlauf, Verteilung nach Kategorie
+- **Monats-Statistik** – Kacheln, Balken pro Tag, Stimmungsverlauf, Verteilung
+  nach Kategorie sowie **Zähler pro Tages-Markierung** (wie oft kam welcher
+  Buchstabe bzw. welches Symbol im Monat vor – auch in der Jahresansicht fürs Jahr)
 - **Jahres-Heatmap** – Pixeljahr in der Statistik (umschaltbar Monat/Jahr),
   einfärbbar nach Einträgen oder Stimmung; Tippen auf einen Tag öffnet ihn
 - Tag-Detail: Einträge anlegen, bearbeiten, löschen
@@ -25,9 +27,11 @@ Portiert aus dem ursprünglichen Claude-Artifact (`tagebuch.jsx`), aber komplett
 - **Wischen** (Swipe) für vorigen/nächsten Tag, Monat bzw. Woche
 - Frei konfigurierbare Kategorien (Name + Farbe), **per Drag sortierbar**;
   Kategorie-Chips füllen die Bildschirmbreite (mehrere Reihen)
-- **Tages-Markierungen W · H · S · B** – feste Buchstaben ohne Text-Eintrag,
-  pro Tag **mehrfach zählbar** (in der Tagesansicht +/−); im Kalenderfeld klein
-  und entsprechend oft wiederholt angezeigt (z. B. „W W S")
+- **Tages-Markierungen W · H · S · B · 🍾 · 🍓** – feste Buchstaben und
+  Emoji-Symbole ohne Text-Eintrag, pro Tag **mehrfach zählbar** (in der
+  Tagesansicht +/−); im Kalenderfeld klein und entsprechend oft wiederholt
+  angezeigt (z. B. „W W 🍾"). Weitere Symbole lassen sich in `index.html`
+  in der Konstante `MARKERS` ergänzen (beliebige Emojis)
 - Volltext-Suche über alle Einträge
 - **Online-Speicher (optional)** – Ende-zu-Ende-verschlüsselte Synchronisation
   über ein privates GitHub-Repository; automatischer Abgleich zwischen Geräten
