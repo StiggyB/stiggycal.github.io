@@ -1,5 +1,5 @@
 /* Tagebuch – Service Worker (App-Shell offline, stale-while-revalidate) */
-const CACHE = "tagebuch-v2";
+const CACHE = "tagebuch-v3";
 const SHELL = [
   "./",
   "./index.html",
@@ -27,6 +27,9 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const req = event.request;
   if (req.method !== "GET") return;
+
+  // Sync-Aufrufe an die GitHub-API gehen immer direkt ins Netz (nie cachen)
+  if (new URL(req.url).hostname === "api.github.com") return;
 
   // Navigations-Anfragen: Netz zuerst, Fallback auf gecachte App-Shell (offline)
   if (req.mode === "navigate") {
