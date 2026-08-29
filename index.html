@@ -414,7 +414,8 @@
   // --- Zusammenführen (pro Eintrag/Tag gewinnt die jüngste Änderung) ---
   function entryMod(e){ return +e.mod || +e.ts || 0; }
   function validRemoteEntry(e){
-    return e && typeof e.id==="string" && typeof e.text==="string" &&
+    return e && (typeof e.id==="string" || typeof e.id==="number") && String(e.id)!=="" &&
+           typeof e.text==="string" &&
            typeof e.date==="string" && /^\d{4}-\d{2}-\d{2}$/.test(e.date);
   }
   function sameCounts(a,b){
@@ -484,7 +485,7 @@
       if(Ltomb[id3]>=entryMod(reE)) continue;
       var leE=byId[id3];
       if(!leE){
-        var rec={ id:reE.id, date:reE.date, ts:+reE.ts||entryMod(reE)||Date.now(),
+        var rec={ id:String(reE.id), date:reE.date, ts:+reE.ts||entryMod(reE)||Date.now(),
                   mod:entryMod(reE), text:String(reE.text),
                   cat:(typeof reE.cat==="string"&&reE.cat) ? reE.cat : FALLBACK.key };
         entries.push(rec); byId[rec.id]=rec;
@@ -1286,8 +1287,8 @@
               '<span class="muted" style="font-size:12px">'+fmtTime(e.ts)+'</span>'+
             '</div>'+
             '<div class="row gap1">'+
-              '<button class="iconbtn sm" style="color:var(--inkSoft)" data-edit="'+e.id+'" aria-label="Bearbeiten">'+icon("Pencil",15)+'</button>'+
-              '<button class="iconbtn sm" style="color:var(--inkSoft)" data-del="'+e.id+'" aria-label="Löschen">'+icon("Trash2",15)+'</button>'+
+              '<button class="iconbtn sm" style="color:var(--inkSoft)" data-edit="'+esc(e.id)+'" aria-label="Bearbeiten">'+icon("Pencil",15)+'</button>'+
+              '<button class="iconbtn sm" style="color:var(--inkSoft)" data-del="'+esc(e.id)+'" aria-label="Löschen">'+icon("Trash2",15)+'</button>'+
             '</div>'+
           '</div>'+
           '<p class="entry-text">'+esc(e.text)+'</p>'+
@@ -1369,7 +1370,7 @@
     }
     return S.searchRes.map(function(e){
       var c = findCat(e.cat);
-      return '<button class="res-btn" data-goto="'+e.id+'">'+
+      return '<button class="res-btn" data-goto="'+esc(e.id)+'">'+
         '<div class="res-meta"><span class="dot" style="background:'+c.color+'"></span>'+
           '<span>'+esc(fmtLongDate(e.date))+' · '+fmtTime(e.ts)+'</span></div>'+
         '<p class="res-text">'+esc(e.text)+'</p></button>';
@@ -1701,7 +1702,7 @@
       for(var i=0;i<list.length;i++){
         var e = list[i];
         if(!e || !e.date || !e.text) continue;
-        var rec = { id:e.id || uid(), date:e.date, ts:e.ts || Date.now(), mod:Date.now(), text:e.text, cat:e.cat || (S.cats[0] && S.cats[0].key) || "privat" };
+        var rec = { id:e.id ? String(e.id) : uid(), date:e.date, ts:e.ts || Date.now(), mod:Date.now(), text:e.text, cat:e.cat || (S.cats[0] && S.cats[0].key) || "privat" };
         if(existing[rec.id]) continue;
         if(syncMeta.tomb[rec.id]!==undefined){ delete syncMeta.tomb[rec.id]; metaTouched=true; }
         existing[rec.id]=true; entries.push(rec); await putEntry(rec); added++;
