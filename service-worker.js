@@ -1,5 +1,5 @@
 /* Tagebuch – Service Worker (App-Shell offline, stale-while-revalidate) */
-const CACHE = "tagebuch-v3";
+const CACHE = "tagebuch-v4";
 const SHELL = [
   "./",
   "./index.html",

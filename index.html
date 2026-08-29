@@ -87,6 +87,10 @@
   .mtoggle .mcount{font-size:11px; font-weight:700; opacity:.9}
   .mdec{width:28px; height:28px; border-radius:8px; border:1px solid var(--line); color:var(--inkSoft); font-size:18px; line-height:1; display:inline-flex; align-items:center; justify-content:center}
   .week-marks{font-size:11px; font-weight:700; letter-spacing:1.5px; color:var(--inkSoft); margin-left:8px}
+  .mtoggle.emo{font-size:17px; filter:grayscale(1); opacity:.75}
+  .mtoggle.emo.on{background:var(--card); border-color:var(--ink); color:var(--ink); filter:none; opacity:1}
+  .day .marks .emk{font-size:11px; letter-spacing:normal}
+  .week-marks .emk{font-size:13px; letter-spacing:normal}
   /* Stimmung */
   .mood-row{display:flex; align-items:center; gap:10px; padding:10px 16px; border-bottom:1px solid var(--line)}
   .mood-btns{display:flex; gap:8px; margin-left:auto}
@@ -154,6 +158,9 @@
   .bar-track{flex:1; height:10px; background:var(--paper); border:1px solid var(--line); border-radius:999px; overflow:hidden}
   .bar-fill{display:block; height:100%; border-radius:999px; min-width:3px}
   .bar-count{font-size:12px; color:var(--inkSoft); width:22px; text-align:right; flex:0 0 auto}
+  .mark-chip{display:inline-flex; align-items:center; justify-content:center; min-width:24px; height:24px; padding:0 5px; border:1px solid var(--line); border-radius:8px; background:var(--card); font-weight:700; font-size:12px; flex:0 0 auto}
+  .mark-chip.emo{font-size:15px; padding:0 2px}
+  .mark-days{font-size:11px; color:var(--inkSoft); overflow:hidden; text-overflow:ellipsis}
   .moodline{padding:10px; background:var(--card); border:1px solid var(--line); border-radius:16px}
   /* Jahres-Heatmap */
   .hm{display:flex; flex-direction:column; gap:3px; padding:10px; background:var(--card); border:1px solid var(--line); border-radius:16px}
@@ -222,7 +229,8 @@
     { key: "gedanke",   label: "Gedanke",   color: "#8E7CB0" }
   ];
   var FALLBACK = { key: "_none", label: "Sonstiges", color: "#8E8B84" };
-  var MARKERS = ["W", "H", "S", "B"];   // feste Tages-Markierungen (kein Text-Eintrag)
+  var MARKERS = ["W", "H", "S", "B", "🍾", "🍓"];   // feste Tages-Markierungen (kein Text-Eintrag); hier um Buchstaben/Emojis erweiterbar
+  var MARKER_COLORS = { "W":"#5B7DB1", "H":"#6BA368", "S":"#C86B8A", "B":"#B0843F", "🍾":"#8E7CB0", "🍓":"#C0504D" }; // Balken in der Statistik
   var MOOD_EMOJI = ["😞","😕","😐","🙂","😄"];
   var MOOD_COLORS = ["#C0504D","#E0784E","#E1B23A","#6BA368","#4C7A6B"];
   var SWATCHES = ["#5B7DB1","#4FA0A0","#6BA368","#8E7CB0","#C86B8A","#C0504D",
@@ -808,6 +816,8 @@
     var out=[]; for(var i=0;i<MARKERS.length;i++){ var n=m[MARKERS[i]]||0; for(var j=0;j<n;j++) out.push(MARKERS[i]); }
     return out;
   }
+  function isEmojiMark(L){ return L.charCodeAt(0) > 127; }   // Emoji-Symbol vs. Buchstabe
+  function markGlyph(L){ return isEmojiMark(L) ? '<span class="emk">'+L+'</span>' : L; }
   async function saveMarkersEnc(){ await dbPut("prefs", { key:"markers", enc: await encJSON(sessionKey, markers) }); }
   function incMarker(dk, L, delta){
     var m = markers[dk] ? Object.assign({}, markers[dk]) : {};
@@ -969,7 +979,7 @@
       var dots = cats.map(function(k){ return '<span class="dot dot-sm" style="background:'+findCat(k).color+'"></span>'; }).join("");
       var cls = "day"+(g.inMonth?"":" out")+(g.key===todayKey?" today":"");
       var mk = markersFor(g.key);
-      var marksSpan = mk.length ? '<span class="marks">'+mk.join(" ")+'</span>' : '';
+      var marksSpan = mk.length ? '<span class="marks">'+mk.map(markGlyph).join(" ")+'</span>' : '';
       var moodSpan = moods[g.key] ? '<span class="mood-mini">'+MOOD_EMOJI[moods[g.key]-1]+'</span>' : '';
       return '<button class="'+cls+'" data-day="'+g.key+'">'+moodSpan+
              '<span class="num">'+g.date.getDate()+'</span>'+
@@ -1003,7 +1013,7 @@
       }
       var cnt = shown.length ? '<span class="week-count">'+shown.length+'</span>' : '';
       var wm = markersFor(dk);
-      var wmSpan = wm.length ? '<span class="week-marks">'+wm.join(" ")+'</span>' : '';
+      var wmSpan = wm.length ? '<span class="week-marks">'+wm.map(markGlyph).join(" ")+'</span>' : '';
       rows += '<button class="week-day'+(isToday?" today":"")+((shown.length||wm.length)?"":" empty")+'" data-day="'+dk+'">'+
         '<div class="week-day-head">'+
           '<span class="week-dow">'+WD_LONG[i]+'</span>'+
@@ -1122,6 +1132,32 @@
     var maxDay = Math.max.apply(null, perDay.concat([0]));
     return { total:list.length, daysInMonth:daysInMonth, daysWith:daysWith, longest:longest,
              catStats:catStats, maxCat:maxCat, perDay:perDay, maxDay:maxDay, busiestWd:busiestWd, maxWd:maxWd };
+  }
+
+  function markerBarsHTML(y, m){        // m === null -> ganzes Jahr
+    var scope = (m===null) ? String(y) : y+"-"+pad(m+1);
+    var totals={}, days={};
+    Object.keys(markers).forEach(function(k){
+      if(k.slice(0, scope.length)!==scope) return;
+      MARKERS.forEach(function(L){
+        var n = markers[k][L]||0;
+        if(n>0){ totals[L]=(totals[L]||0)+n; days[L]=(days[L]||0)+1; }
+      });
+    });
+    var list = MARKERS.filter(function(L){ return totals[L]>0; })
+                      .sort(function(a,b){ return totals[b]-totals[a]; });
+    var title = '<div class="stat-section-title">Markierungen</div>';
+    if(!list.length) return title+'<p class="note" style="margin-top:0">Keine Markierungen in diesem '+(m===null?"Jahr":"Monat")+'.</p>';
+    var max = totals[list[0]];
+    return title + list.map(function(L){
+      var w = Math.round(totals[L]/max*100);
+      var tage = days[L]+" "+(days[L]===1?"Tag":"Tagen");
+      var dayInfo = days[L]<totals[L] ? '<span class="mark-days">an '+tage+'</span>' : '';
+      return '<div class="bar-row" title="'+L+': '+totals[L]+'× an '+tage+'">'+
+        '<span class="bar-label"><span class="mark-chip'+(isEmojiMark(L)?" emo":"")+'">'+L+'</span>'+dayInfo+'</span>'+
+        '<span class="bar-track"><span class="bar-fill" style="width:'+w+'%; background:'+(MARKER_COLORS[L]||"#7E8B8E")+'"></span></span>'+
+        '<span class="bar-count">'+totals[L]+'</span></div>';
+    }).join("");
   }
 
   function moodTrendHTML(y,m){
@@ -1249,7 +1285,8 @@
         '<button class="'+(!isYear?"on":"")+'" data-act="stats-mode-month">Monat</button>'+
         '<button class="'+(isYear?"on":"")+'" data-act="stats-mode-year">Jahr</button>'+
       '</div></div>';
-    var content = isYear ? yearHeatHTML(y) : tiles + dayBars + moodTrendHTML(y,m) + catBars;
+    var content = isYear ? yearHeatHTML(y) + markerBarsHTML(y, null)
+                         : tiles + dayBars + moodTrendHTML(y,m) + catBars + markerBarsHTML(y, m);
 
     return headerHTML()+
     '<main>'+
@@ -1301,7 +1338,7 @@
       var badge = n>=2 ? '<span class="mcount">×'+n+'</span>' : '';
       var dec = n>=1 ? '<button class="mdec" data-mark-dec="'+L+'" aria-label="'+L+' verringern">−</button>' : '';
       return '<span class="mstep">'+
-        '<button class="mtoggle'+(n>0?" on":"")+'" data-mark-inc="'+L+'" aria-label="'+L+' hinzufügen'+(n?" (aktuell "+n+")":"")+'">'+L+badge+'</button>'+
+        '<button class="mtoggle'+(isEmojiMark(L)?" emo":"")+(n>0?" on":"")+'" data-mark-inc="'+L+'" aria-label="'+L+' hinzufügen'+(n?" (aktuell "+n+")":"")+'">'+L+badge+'</button>'+
         dec+'</span>'; }).join("");
     var mv = moods[S.selected]||0;
     var moodBtns = MOOD_EMOJI.map(function(em,i){
